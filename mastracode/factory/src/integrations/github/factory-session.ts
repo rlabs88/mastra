@@ -1,14 +1,16 @@
 import { randomUUID } from 'node:crypto';
 
+import type { FactoryProjectsStorage } from '../../storage/domains/projects/base.js';
 import type { GithubIntegration } from './integration.js';
 
 export async function ensureFactoryRuleSession(args: {
   github: GithubIntegration;
+  projects: Pick<FactoryProjectsStorage, 'get'>;
   orgId: string;
   factoryProjectId: string;
   repositorySlug?: string;
   branch: string;
-}): Promise<{ sessionId: string; userId: string }> {
+}): Promise<{ sessionId: string; userId: string; defaultModelId?: string }> {
   const connections = await args.github.sourceControlStorage.connections.list({
     orgId: args.orgId,
     factoryProjectId: args.factoryProjectId,
@@ -43,5 +45,10 @@ export async function ensureFactoryRuleSession(args: {
     branch: args.branch,
     baseBranch: resolved.projectRepository.branch ?? resolved.repository.defaultBranch,
   });
-  return { sessionId: session.sessionId, userId };
+  const project = await args.projects.get({ orgId: args.orgId, id: args.factoryProjectId });
+  return {
+    sessionId: session.sessionId,
+    userId,
+    ...(project?.defaultModelId ? { defaultModelId: project.defaultModelId } : {}),
+  };
 }

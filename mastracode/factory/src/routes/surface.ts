@@ -154,6 +154,7 @@ export function factoryRuleBranch(item: FactoryBindingPreparationInput['item']):
 async function prepareFactoryRuleBinding(
   github: GithubIntegration,
   coordinator: FactoryStartCoordinator,
+  projects: FactoryProjectsStorage,
   input: FactoryBindingPreparationInput,
 ): Promise<void> {
   const branch = factoryRuleBranch(input.item);
@@ -161,6 +162,7 @@ async function prepareFactoryRuleBinding(
     typeof input.item.metadata?.repository === 'string' ? input.item.metadata.repository : undefined;
   const preparedSession = await ensureFactoryRuleSession({
     github,
+    projects,
     orgId: input.record.orgId,
     factoryProjectId: input.record.factoryProjectId,
     repositorySlug,
@@ -177,6 +179,7 @@ async function prepareFactoryRuleBinding(
     threadTitle: `${input.role === 'review' ? 'PR' : 'Issue'}: ${input.item.title}`,
     kickoffKey: input.record.id,
     destinationStage: destinationStage as 'intake' | 'triage' | 'planning' | 'execute' | 'review' | 'done',
+    ...(preparedSession.defaultModelId ? { defaultModelId: preparedSession.defaultModelId } : {}),
     workItem: {
       id: input.item.id,
       role: input.role,
@@ -370,7 +373,7 @@ export function assembleFactoryApiRoutes(deps: FactoryApiRoutesDeps): ApiRoute[]
       ...(githubIntegration
         ? {
             prepareBinding: (input: FactoryBindingPreparationInput) =>
-              prepareFactoryRuleBinding(githubIntegration, startCoordinator, input),
+              prepareFactoryRuleBinding(githubIntegration, startCoordinator, deps.domains.projects, input),
           }
         : {}),
     });

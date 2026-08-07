@@ -10,7 +10,7 @@ describe('ensureFactoryRuleSession', () => {
     const project = await seeded.projects.create({
       orgId: 'org-1',
       userId: 'user-1',
-      input: { name: 'Mastra' },
+      input: { name: 'Mastra', defaultModelId: 'a1-proxy/code-workhorse-high' },
     });
     const installation = await sourceControlStorage.installations.upsert({
       orgId: 'org-1',
@@ -44,6 +44,7 @@ describe('ensureFactoryRuleSession', () => {
 
     const result = await ensureFactoryRuleSession({
       github,
+      projects: seeded.projects,
       orgId: 'org-1',
       factoryProjectId: project.id,
       repositorySlug: repository.slug,
@@ -51,6 +52,7 @@ describe('ensureFactoryRuleSession', () => {
     });
 
     expect(result.userId).toBe('user-1');
+    expect(result.defaultModelId).toBe('a1-proxy/code-workhorse-high');
     await expect(sourceControlStorage.sessions.getBySessionId(result.sessionId)).resolves.toEqual(
       expect.objectContaining({
         projectRepositoryId: projectRepository.id,
