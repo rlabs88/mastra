@@ -141,6 +141,8 @@ export function createFactoryAutomationCommands(
           title: request.title,
           stages: ['intake'],
           metadata: {
+            repository: request.repositoryNameWithOwner,
+            githubIssueNumber: request.number,
             repositoryNameWithOwner: request.repositoryNameWithOwner,
             issueNumber: request.number,
             projectItemNodeId: request.projectItemNodeId,

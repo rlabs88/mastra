@@ -116,7 +116,11 @@ describe('Factory automation commands', () => {
               type: 'issue',
               externalId: 'I_global_42',
             }),
-            metadata: expect.objectContaining({ automationSource: 'github-projects-v2' }),
+            metadata: expect.objectContaining({
+              repository: 'acme/api',
+              githubIssueNumber: 42,
+              automationSource: 'github-projects-v2',
+            }),
           }),
         }),
       }),
