@@ -13,7 +13,7 @@ export interface FactoryAutomationTransitionRequest extends Omit<FactoryTransiti
   idempotencyKey: string;
 }
 
-export interface FactoryAutomatedStartInput {
+export interface FactoryAutomatedPrepareInput {
   orgId: string;
   userId: string;
   factoryProjectId: string;
@@ -25,12 +25,15 @@ export interface FactoryAutomatedStartInput {
   title: string;
   url: string;
   kickoffKey: string;
-  prompt: string;
   role: string;
-  destinationStage: FactoryStartRequest['destinationStage'];
   defaultModelId?: string;
   workItemId?: string;
   metadata?: Record<string, unknown>;
+}
+
+export interface FactoryAutomatedStartInput extends FactoryAutomatedPrepareInput {
+  prompt: string;
+  destinationStage: FactoryStartRequest['destinationStage'];
 }
 
 export interface FactoryAutomationActiveRunRequest {
@@ -43,6 +46,7 @@ export type FactoryAutomationWorkItemRequest = FactoryAutomationActiveRunRequest
 
 /** Governed host commands exposed to trusted control-plane integrations. */
 export interface FactoryAutomationCommands {
+  prepareWorkItem(request: FactoryAutomatedPrepareInput): Promise<FactoryStartPreparedResult>;
   startWorkItem(request: FactoryAutomatedStartInput): Promise<FactoryStartPreparedResult>;
   transitionWorkItem(request: FactoryAutomationTransitionRequest): Promise<FactoryTransitionResult>;
   getActiveRun(request: FactoryAutomationActiveRunRequest): Promise<FactoryRunBindingRecord | null>;
@@ -70,7 +74,11 @@ export function createFactoryAutomationCommands(
     options.memorySettings,
   );
 
-  const startWorkItem = async (request: FactoryAutomatedStartInput): Promise<FactoryStartPreparedResult> => {
+  const prepare = async (
+    request: FactoryAutomatedPrepareInput,
+    destinationStage: FactoryStartRequest['destinationStage'],
+    invocation?: FactoryStartRequest['invocation'],
+  ): Promise<FactoryStartPreparedResult> => {
     if (!options.sourceControl) throw new Error('Factory source control storage is unavailable');
     const projectRepository = await options.sourceControl.projectRepositories.get({
       orgId: request.orgId,
@@ -116,8 +124,8 @@ export function createFactoryAutomationCommands(
         contentNodeId: request.contentNodeId,
       },
       kickoffKey: request.kickoffKey,
-      invocation: { type: 'prompt', prompt: request.prompt },
-      destinationStage: request.destinationStage,
+      invocation,
+      destinationStage,
       defaultModelId: request.defaultModelId,
       actor,
       workItem: {
@@ -145,7 +153,8 @@ export function createFactoryAutomationCommands(
   };
 
   return {
-    startWorkItem,
+    prepareWorkItem: request => prepare(request, 'intake'),
+    startWorkItem: request => prepare(request, request.destinationStage, { type: 'prompt', prompt: request.prompt }),
     transitionWorkItem: request => {
       const { idempotencyKey, ...transition } = request;
       return options.transitionService.transition({

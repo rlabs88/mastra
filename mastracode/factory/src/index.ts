@@ -12,6 +12,7 @@ export type { FactoryProject } from './storage/domains/projects/base.js';
 export { WorkItemsStorage } from './storage/domains/work-items/base.js';
 export type { CreateWorkItemInput, WorkItemRow } from './storage/domains/work-items/base.js';
 export type {
+  FactoryAutomatedPrepareInput,
   FactoryAutomatedStartInput,
   FactoryAutomationActiveRunRequest,
   FactoryAutomationCommands,

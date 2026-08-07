@@ -14,6 +14,53 @@ vi.mock('./start-coordinator.js', async importOriginal => {
 import { createFactoryAutomationCommands } from './automation-commands.js';
 
 describe('Factory automation commands', () => {
+  it('prepares an Intake work item without queueing an agent kickoff', async () => {
+    prepareStart.mockResolvedValueOnce({ workItemId: 'item-intake' });
+    const sourceControl = {
+      projectRepositories: {
+        get: vi.fn(async () => ({ id: 'repo-link-1', connectionId: 'connection-1', branch: 'main' })),
+      },
+      connections: { get: vi.fn(async () => ({ factoryProjectId: 'project-1' })) },
+      sessions: {
+        getForBranch: vi.fn(async () => null),
+        create: vi.fn(async input => ({ ...input })),
+      },
+    };
+    const commands = createFactoryAutomationCommands({
+      integrationId: 'github-projects',
+      controller: {} as never,
+      storage: {} as never,
+      transitionService: { transition: vi.fn() },
+      sourceControl: sourceControl as never,
+    });
+
+    await commands.prepareWorkItem({
+      orgId: 'org-1',
+      userId: 'automation-user',
+      factoryProjectId: 'project-1',
+      projectRepositoryId: 'repo-link-1',
+      projectItemNodeId: 'PVTI_intake',
+      contentNodeId: 'I_intake',
+      repositoryNameWithOwner: 'acme/api',
+      number: 7,
+      title: 'Investigate flaky builds',
+      url: 'https://github.com/acme/api/issues/7',
+      kickoffKey: 'github-project:I_intake',
+      role: 'triage',
+    });
+
+    expect(prepareStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        destinationStage: 'intake',
+        invocation: undefined,
+        workItem: expect.objectContaining({
+          role: 'triage',
+          input: expect.objectContaining({ stages: ['intake'] }),
+        }),
+      }),
+    );
+  });
+
   it('validates repository ownership and creates a collision-safe Factory source session', async () => {
     prepareStart.mockResolvedValueOnce({ workItemId: 'item-1' });
     const create = vi.fn(async input => ({ ...input }));
