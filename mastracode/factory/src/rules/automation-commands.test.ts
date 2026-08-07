@@ -111,7 +111,12 @@ describe('Factory automation commands', () => {
         sessionId: expect.any(String),
         workItem: expect.objectContaining({
           input: expect.objectContaining({
-            externalSource: expect.objectContaining({ externalId: 'I_global_42' }),
+            externalSource: expect.objectContaining({
+              integrationId: 'github',
+              type: 'issue',
+              externalId: 'I_global_42',
+            }),
+            metadata: expect.objectContaining({ automationSource: 'github-projects-v2' }),
           }),
         }),
       }),

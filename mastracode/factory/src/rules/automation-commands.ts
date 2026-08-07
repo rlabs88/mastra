@@ -133,7 +133,7 @@ export function createFactoryAutomationCommands(
         role: request.role,
         input: {
           externalSource: {
-            integrationId: 'github-projects-v2',
+            integrationId: 'github',
             type: 'issue',
             externalId: request.contentNodeId,
             url: request.url,
@@ -145,6 +145,7 @@ export function createFactoryAutomationCommands(
             issueNumber: request.number,
             projectItemNodeId: request.projectItemNodeId,
             contentNodeId: request.contentNodeId,
+            automationSource: 'github-projects-v2',
             ...(request.metadata ?? {}),
           },
         },
