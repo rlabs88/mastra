@@ -55,6 +55,7 @@ import { OnboardingInlineComponent } from './onboarding-inline.js';
 import { showModalOverlay } from './overlay.js';
 import { promptForApiKeyIfNeeded } from './prompt-api-key.js';
 
+import { createRemoteMastraTUIRuntime } from './remote-runtime.js';
 import {
   addPendingUserMessage,
   addUserMessage,
@@ -176,7 +177,11 @@ export class MastraTUI {
   private static readonly DOUBLE_CTRL_C_MS = 500;
 
   constructor(options: MastraTUIOptions) {
-    this.state = createTUIState(options);
+    const resolvedOptions =
+      options.backend && (!options.controller || !options.session)
+        ? { ...options, ...createRemoteMastraTUIRuntime(options.backend) }
+        : options;
+    this.state = createTUIState(resolvedOptions);
 
     options.githubSignals?.onSubscriptionsChanged(event => {
       const currentThreadId = this.state.session?.thread?.getId?.();
@@ -343,6 +348,10 @@ export class MastraTUI {
 
         // Handle shell passthrough (! prefix)
         if (userInput.startsWith('!')) {
+          if (this.state.options.backend && !this.state.options.backend.capabilities.localControlPlane) {
+            showInfo(this.state, 'Local shell requires embedded mcode.');
+            continue;
+          }
           await handleShellPassthrough(this.state, userInput.slice(1).trim());
           continue;
         }
@@ -375,6 +384,7 @@ export class MastraTUI {
    * Errors are handled via controller events.
    */
   private fireMessage(content: string, images?: Array<{ data: string; mimeType: string }>): void {
+    if (!this.canUseRemoteCapability('chat')) return;
     this.clearStatusTimingTicker();
     const files = images?.map(img => ({ data: img.data, mediaType: img.mimeType }));
     this.state.session.sendMessage({ content, files }).catch(error => {
@@ -448,6 +458,10 @@ export class MastraTUI {
     optimisticMessageId: string,
     pendingNewThread: boolean,
   ): void {
+    if (!this.canUseRemoteCapability('chat')) {
+      this.removeOptimisticUserMessage(optimisticMessageId);
+      return;
+    }
     const send = () => {
       this.clearStatusTimingTicker();
       this.state.analytics?.capture('mastracode_prompt_submitted', {
@@ -483,6 +497,7 @@ export class MastraTUI {
   }
 
   private signalMessage(content: string, images?: Array<{ data: string; mimeType: string }>): void {
+    if (!this.canUseRemoteCapability('chat')) return;
     const hasActiveRun = this.state.session.stream.isActive();
 
     const send = () => {
@@ -521,6 +536,13 @@ export class MastraTUI {
     pendingThread.then(send).catch((error: unknown) => {
       showError(this.state, error instanceof Error ? error.message : 'Unknown error');
     });
+  }
+
+  private canUseRemoteCapability(capability: 'chat'): boolean {
+    const backend = this.state.options.backend;
+    if (!backend || backend.capabilities.localControlPlane || backend.capabilities[capability]) return true;
+    showInfo(this.state, `Chat is not supported by this remote Mastra runtime.`);
+    return false;
   }
 
   private queueFollowUpMessage(text: string): void {
@@ -695,11 +717,11 @@ export class MastraTUI {
     // Render existing tasks if any
     await renderExistingTasks(this.state);
 
-    if (this.shouldShowOnboarding()) {
+    if (!this.state.options.backend && this.shouldShowOnboarding()) {
       await this.showOnboarding();
     }
 
-    await this.showQuietModePreferencePromptIfNeeded();
+    if (!this.state.options.backend) await this.showQuietModePreferencePromptIfNeeded();
 
     // Check for updates after first render so network latency never blocks startup.
     void this.checkForUpdate().catch(() => {});
@@ -1167,6 +1189,10 @@ export class MastraTUI {
           }
 
           if (text.startsWith('!')) {
+            if (this.state.options.backend && !this.state.options.backend.capabilities.localControlPlane) {
+              showInfo(this.state, 'Local shell requires embedded mcode.');
+              return;
+            }
             // Shell passthrough runs locally and never touches the agent, so
             // run it immediately instead of steering the active run with it.
             void handleShellPassthrough(this.state, text.slice(1).trim());

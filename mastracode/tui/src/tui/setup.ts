@@ -162,10 +162,17 @@ export function setupKeyboardShortcuts(
   });
 
   // Ctrl+Y - toggle YOLO mode
-  state.editor.onAction('toggleYolo', () => {
+  state.editor.onAction('toggleYolo', async () => {
     const current = (state.session.state.get() as any)?.yolo === true;
-    void state.session.state.set({ yolo: !current } as any);
-    showInfo(state, current ? 'YOLO mode off' : 'YOLO mode on');
+    try {
+      await state.session.state.set({ yolo: !current } as any);
+      showInfo(state, current ? 'YOLO mode off' : 'YOLO mode on');
+    } catch (error) {
+      showError(
+        state,
+        `Failed to ${current ? 'disable' : 'enable'} YOLO mode: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   });
 
   // Enter - submit immediately. The submit handler decides whether active input

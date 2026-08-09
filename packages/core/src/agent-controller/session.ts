@@ -1061,6 +1061,8 @@ export interface PendingSuspension {
 export class SessionSuspensions {
   /** Parked tool calls awaiting a resume, keyed by `toolCallId`. */
   readonly #pending = new Map<string, PendingSuspension>();
+  /** Tool calls temporarily owned by an in-flight server-side interaction. */
+  readonly #claimed = new Set<string>();
 
   /** Park `toolCallId` as awaiting a resume on `runId` for `toolName`. */
   register({ toolCallId, runId, toolName }: { toolCallId: string; runId: string; toolName: string }): void {
@@ -1080,6 +1082,20 @@ export class SessionSuspensions {
   /** Drop `toolCallId` from the parked set (e.g. once resumed). */
   delete({ toolCallId }: { toolCallId: string }): void {
     this.#pending.delete(toolCallId);
+    this.#claimed.delete(toolCallId);
+  }
+
+  /** Claim a pending suspension so concurrent responders fail closed. */
+  claim({ toolCallId }: { toolCallId: string }): PendingSuspension | undefined {
+    const pending = this.#pending.get(toolCallId);
+    if (!pending || this.#claimed.has(toolCallId)) return undefined;
+    this.#claimed.add(toolCallId);
+    return pending;
+  }
+
+  /** Release a prior claim without removing the pending suspension. */
+  releaseClaim({ toolCallId }: { toolCallId: string }): void {
+    this.#claimed.delete(toolCallId);
   }
 
   /**
@@ -1095,6 +1111,7 @@ export class SessionSuspensions {
     for (const [toolCallId, suspension] of this.#pending) {
       if (suspension.runId === runId) {
         this.#pending.delete(toolCallId);
+        this.#claimed.delete(toolCallId);
         dropped.push({ toolCallId, toolName: suspension.toolName });
       }
     }
@@ -1108,6 +1125,7 @@ export class SessionSuspensions {
   clear(): Array<{ toolCallId: string; toolName: string }> {
     const dropped = [...this.#pending].map(([toolCallId, { toolName }]) => ({ toolCallId, toolName }));
     this.#pending.clear();
+    this.#claimed.clear();
     return dropped;
   }
 
@@ -1123,10 +1141,11 @@ export class SessionSuspensions {
    */
   resolveToolCallId(toolCallId?: string): string | undefined {
     if (toolCallId) {
-      return this.#pending.has(toolCallId) ? toolCallId : undefined;
+      return this.#pending.has(toolCallId) && !this.#claimed.has(toolCallId) ? toolCallId : undefined;
     }
-    if (this.#pending.size === 1) {
-      return this.#pending.keys().next().value;
+    const available = [...this.#pending.keys()].filter(id => !this.#claimed.has(id));
+    if (available.length === 1) {
+      return available[0];
     }
     return undefined;
   }
@@ -1258,9 +1277,9 @@ export class SessionApproval {
     requestContext,
     declineContext,
     onAlwaysAllow,
-  }: ApprovalResponse & { toolCallId?: string; onAlwaysAllow?: (toolName: string) => void }): void {
-    if (!this.isArmed()) return;
-    if (toolCallId !== undefined && this.#toolCallId !== null && toolCallId !== this.#toolCallId) return;
+  }: ApprovalResponse & { toolCallId?: string; onAlwaysAllow?: (toolName: string) => void }): boolean {
+    if (!this.isArmed()) return false;
+    if (toolCallId !== undefined && this.#toolCallId !== null && toolCallId !== this.#toolCallId) return false;
 
     if (decision === 'always_allow_category' && this.#toolName) {
       onAlwaysAllow?.(this.#toolName);
@@ -1275,6 +1294,7 @@ export class SessionApproval {
     this.#resolve = null;
     this.#toolName = null;
     this.#toolCallId = null;
+    return true;
   }
 
   /**
@@ -3163,8 +3183,8 @@ export class Session<TState = unknown> {
     toolCallId?: string;
     requestContext?: RequestContext;
     declineContext?: { reason?: string; message?: string };
-  }): void {
-    this.approval.respond({
+  }): boolean {
+    return this.approval.respond({
       decision,
       toolCallId,
       requestContext,
@@ -3269,6 +3289,7 @@ export class Session<TState = unknown> {
     input:
       | AgentSignalInput
       | {
+          id?: string;
           content: AgentSignalContents;
           ifActive?: { attributes?: AgentSignalAttributes };
           ifIdle?: { attributes?: AgentSignalAttributes };
@@ -3332,7 +3353,13 @@ export class Session<TState = unknown> {
     const submittedAbortRequested = this.run.isAbortRequested();
     const signal = createSignal(
       'content' in input
-        ? { type: 'user', tagName: 'user', contents: input.content, providerOptions: input.providerOptions }
+        ? {
+            id: input.id,
+            type: 'user',
+            tagName: 'user',
+            contents: input.content,
+            providerOptions: input.providerOptions,
+          }
         : input,
     );
     const accepted = Promise.resolve().then(async () => {
@@ -3630,9 +3657,9 @@ export class Session<TState = unknown> {
     resumeData: any;
     toolCallId?: string;
     requestContext?: RequestContext;
-  }): Promise<void> {
+  }): Promise<boolean> {
     const resolvedToolCallId = this.suspensions.resolveToolCallId(toolCallId);
-    if (!resolvedToolCallId) return;
+    if (!resolvedToolCallId) return false;
 
     const suspension = this.suspensions.get({ toolCallId: resolvedToolCallId });
 
@@ -3643,7 +3670,7 @@ export class Session<TState = unknown> {
           response: resumeData as { action: 'approved' | 'rejected'; feedback?: string },
           requestContext,
         });
-        return;
+        return true;
       }
 
       await this.resumeToolCall({
@@ -3656,6 +3683,7 @@ export class Session<TState = unknown> {
       this.emit({ type: 'error', error: err });
       await this.finishAgentRun('error');
     }
+    return true;
   }
 
   /**

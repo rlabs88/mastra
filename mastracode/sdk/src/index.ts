@@ -99,6 +99,7 @@ import type { MastraCodeState } from './schema.js';
 
 import { mastraBrand } from './theme-palette.js';
 import { syncGateways } from './utils/gateway-sync.js';
+import { approvePlanFile, readPlanFile, resolvePlanPath } from './utils/plans.js';
 import {
   detectProject,
   getObservabilityDatabasePath,
@@ -291,6 +292,8 @@ export interface MastraCodeConfig {
   disablePlugins?: boolean;
   /** Disable the polling-based GitHub signal provider even when enabled in global settings. Default: false */
   disableGithubSignals?: boolean;
+  /** Disable Mastra Cloud trace export even when cloud credentials are present. Default: false. */
+  disableCloudObservability?: boolean;
   /**
    * Skip seeding observational-memory knobs (observer/reflector models,
    * thresholds, caveman mode, attachment observation) from settings.json.
@@ -604,7 +607,13 @@ export async function createMastraCodeAgentController(config?: MastraCodeConfig)
           // exporter falls through to the default libsql backend and silently
           // fills the main database with gigabytes of span data.
           ...(observabilityDomain ? [new MastraStorageExporter({ strategy: 'event-sourced' })] : []),
-          new MastraPlatformExporter(resolveCloudObservabilityConfig(globalSettings, authStorage, project.resourceId)),
+          ...(config?.disableCloudObservability
+            ? []
+            : [
+                new MastraPlatformExporter(
+                  resolveCloudObservabilityConfig(globalSettings, authStorage, project.resourceId),
+                ),
+              ]),
         ],
         spanOutputProcessors: [new SensitiveDataFilter()],
       },
@@ -1128,6 +1137,15 @@ export async function createMastraCodeAgentController(config?: MastraCodeConfig)
       // with MCP/hooks/storage which were already initialized with this value.
       configDir,
     },
+    planApproval: async ({ projectPath, submittedPath, resourceId, archive }) => {
+      const planPath = resolvePlanPath(projectPath, submittedPath);
+      if (!planPath) throw new Error(`Invalid submitted plan path: ${submittedPath}`);
+      const current = await readPlanFile(planPath);
+      if (!current) throw new Error(`Could not read submitted plan: ${submittedPath}`);
+      const title = current.title || 'Implementation Plan';
+      if (archive) await approvePlanFile({ planPath, title, resourceId });
+      return { title, plan: current.plan };
+    },
     modes,
     intervalHandlers,
     modelUseCountProvider: () => loadSettings().modelUseCounts,
@@ -1449,6 +1467,7 @@ export async function prepareAgentControllerMount(
   const mastraArgs = {
     agentControllers: { [controllerId]: controller },
     storage,
+    observability: base.observability,
     // Mirror the controller's internal-Mastra construction (which passes
     // `config.pubsub` through): the server-owned Mastra must run its event
     // bus on the same transport so streams/workflows/signals stay

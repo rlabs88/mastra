@@ -2637,6 +2637,9 @@ importers:
       '@mastra/agent-browser':
         specifier: workspace:*
         version: link:../../browser/agent-browser
+      '@mastra/client-js':
+        specifier: workspace:^
+        version: link:../../client-sdks/client-js
       '@mastra/code-sdk':
         specifier: workspace:^
         version: link:../sdk

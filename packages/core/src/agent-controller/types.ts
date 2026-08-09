@@ -247,6 +247,18 @@ export interface AgentControllerConfig<TState = {}> {
   /** Initial state values (must conform to schema) */
   initialState?: Partial<TState>;
 
+  /**
+   * Server-owned plan reader/archiver used by remote rich clients. The host
+   * resolves the submitted path inside its own project mount and archives only
+   * after an explicit approval.
+   */
+  planApproval?: (input: {
+    projectPath: string;
+    submittedPath: string;
+    resourceId: string;
+    archive: boolean;
+  }) => Promise<{ title: string; plan: string }>;
+
   /** Memory configuration (shared across all modes) */
   memory?: DynamicArgument<MastraMemory>;
 
