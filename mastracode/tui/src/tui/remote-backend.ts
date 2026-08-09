@@ -73,7 +73,7 @@ export interface MastraTUIBackendConnection {
 
 export interface MastraTUISessionBackend {
   start(callbacks: {
-    onSnapshot(snapshot: MastraTUIRemoteSnapshot): void;
+    onSnapshot(snapshot: MastraTUIRemoteSnapshot, boundary?: { bufferedEvents: AgentControllerEvent[] }): void;
     onEvent(event: AgentControllerEvent): void;
     onError?(error: unknown): void;
   }): Promise<MastraTUIBackendConnection>;
@@ -231,15 +231,22 @@ export function createRemoteMastraTUIBackend(options: RemoteMastraTUIBackendOpti
           previousSnapshotAtBoundary = latestSnapshot;
           latestSnapshot = candidate;
           appliedHydration = generation;
-          callbacks.onSnapshot(candidate);
+          const boundaryEvents = pruneSnapshotRepresentedEvents(
+            buffered.splice(0),
+            candidate,
+            previousSnapshotAtBoundary,
+          );
+          callbacks.onSnapshot(candidate, { bufferedEvents: boundaryEvents });
+          if (!closed && generation === requestedHydration) {
+            buffering = false;
+            for (const event of boundaryEvents) {
+              callbacks.onEvent(event);
+            }
+          }
         }
         if (!closed && appliedHydration === requestedHydration) {
           buffering = false;
-          for (const event of pruneSnapshotRepresentedEvents(
-            buffered.splice(0),
-            latestSnapshot,
-            previousSnapshotAtBoundary,
-          )) {
+          for (const event of buffered.splice(0)) {
             callbacks.onEvent(event);
           }
         }
@@ -430,17 +437,11 @@ function pruneSnapshotRepresentedEvents(
     if (event.type === 'thread_changed' && snapshot.threadId === event.threadId) return false;
     if (event.type === 'thread_created' && snapshot.threadId === (event.thread as { id?: unknown }).id) return false;
     if (event.type === 'agent_start' && snapshot.running === true) return false;
-    if (event.type === 'agent_end' && previousSnapshot?.running === true && snapshot.running !== true) return false;
-    if (
-      event.type === 'tool_end' &&
-      eventToolCallId &&
-      (eventToolCallId in previousActiveTools ||
-        eventToolCallId in previousSuspensions ||
-        eventToolCallId === previousApprovalId) &&
-      !(eventToolCallId in activeTools) &&
-      !(eventToolCallId in pendingSuspensions)
-    )
-      return false;
+    if (event.type === 'tool_end' && eventToolCallId) {
+      const completed = findCompletedToolEvent(snapshot.messages, eventToolCallId);
+      if (completed && sameSerialized(completed.result, event.result) && completed.isError === event.isError)
+        return false;
+    }
     if (
       (event.type === 'tool_input_start' || event.type === 'tool_input_delta') &&
       eventToolCallId &&
@@ -477,12 +478,25 @@ function pruneSnapshotRepresentedEvents(
       )
         return false;
     }
-    if ((event.type === 'subagent_tool_start' || event.type === 'subagent_tool_end') && eventToolCallId) {
-      const subagent = activeSubagents[eventToolCallId] as { toolCalls?: Array<{ name?: unknown }> } | undefined;
-      if (subagent?.toolCalls?.some(tool => tool.name === event.subToolName)) return false;
-    }
     return true;
   });
+}
+
+function findCompletedToolEvent(messages: MastraDBMessage[], toolCallId: string) {
+  for (const message of messages) {
+    const parts = Array.isArray(message.content) ? message.content : [];
+    for (const part of parts) {
+      if (!part || typeof part !== 'object') continue;
+      const value = part as Record<string, unknown>;
+      const id = value.toolCallId ?? value.tool_call_id;
+      if (id !== toolCallId || !('result' in value || 'output' in value)) continue;
+      return {
+        result: value.result ?? value.output,
+        isError: value.isError === true || value.is_error === true,
+      };
+    }
+  }
+  return undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

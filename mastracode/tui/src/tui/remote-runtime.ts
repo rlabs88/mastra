@@ -68,7 +68,7 @@ export function createRemoteMastraTUIRuntime(backend: MastraTUIBackend): {
     else queuedEvents.push(event);
   };
 
-  const applySnapshot = (next: MastraTUIRemoteSnapshot) => {
+  const applySnapshot = (next: MastraTUIRemoteSnapshot, boundary?: { bufferedEvents: AgentControllerEvent[] }) => {
     const previous = snapshot;
     const previousDisplayState = displayState;
     snapshot = next;
@@ -81,7 +81,14 @@ export function createRemoteMastraTUIRuntime(backend: MastraTUIBackend): {
     currentTraceId = next.traceId;
     if (next.threadId) messages.set(next.threadId, [...next.messages]);
     if (previous) {
-      for (const event of reconcileSnapshot(previous, next, previousDisplayState, displayState)) notify(event);
+      for (const event of reconcileSnapshot(
+        previous,
+        next,
+        previousDisplayState,
+        displayState,
+        boundary?.bufferedEvents,
+      ))
+        notify(event);
       if (connection) {
         void backend
           .getPermissions()
@@ -530,6 +537,7 @@ function reconcileSnapshot(
   next: MastraTUIRemoteSnapshot,
   previousDisplay: ReturnType<typeof defaultDisplayState>,
   nextDisplay: ReturnType<typeof defaultDisplayState>,
+  boundaryEvents: AgentControllerEvent[] = [],
 ): AgentControllerEvent[] {
   const events: AgentControllerEvent[] = [];
   if (previous.threadId !== next.threadId && next.threadId) {
@@ -720,7 +728,32 @@ function reconcileSnapshot(
     events.push({ type: 'agent_end', reason: completedDuringGap ? 'complete' : 'aborted' });
   }
   events.push({ type: 'display_state_changed', displayState: nextDisplay });
-  return events;
+  return events.filter(event => !isRepresentedByBoundaryEvent(event, boundaryEvents));
+}
+
+function isRepresentedByBoundaryEvent(
+  synthetic: AgentControllerEvent,
+  boundaryEvents: AgentControllerEvent[],
+): boolean {
+  if (synthetic.type === 'display_state_changed') return false;
+  return boundaryEvents.some(actual => {
+    if (actual.type !== synthetic.type) return false;
+    const actualToolCallId = 'toolCallId' in actual ? actual.toolCallId : undefined;
+    const syntheticToolCallId = 'toolCallId' in synthetic ? synthetic.toolCallId : undefined;
+    if (actualToolCallId !== undefined || syntheticToolCallId !== undefined) {
+      return actualToolCallId === syntheticToolCallId;
+    }
+    if ('message' in actual && 'message' in synthetic) {
+      return (actual.message as { id?: unknown })?.id === (synthetic.message as { id?: unknown })?.id;
+    }
+    if (actual.type === 'thread_changed' && synthetic.type === 'thread_changed') {
+      return actual.threadId === synthetic.threadId;
+    }
+    if (actual.type === 'thread_created' && synthetic.type === 'thread_created') {
+      return (actual.thread as { id?: unknown })?.id === (synthetic.thread as { id?: unknown })?.id;
+    }
+    return true;
+  });
 }
 
 function isCompletedToolPart(part: AssistantRenderPart): part is ToolRenderPart {
