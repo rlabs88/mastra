@@ -20007,8 +20007,24 @@ export type GetAgentControllerControllerIdSessionsResourceId_Response = {
         thinkingLevel?: ('off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max') | undefined;
         notifications: 'off' | 'bell' | 'system' | 'both';
         smartEditing: boolean;
+        observerModelId?: string | undefined;
+        reflectorModelId?: string | undefined;
+        observationThreshold?: number | undefined;
+        reflectionThreshold?: number | undefined;
+        subagentModelId?: string | undefined;
+        subagentModels?:
+          | {
+              [key: string]: string;
+            }
+          | undefined;
       }
     | undefined;
+  displayState?:
+    | {
+        [key: string]: unknown;
+      }
+    | undefined;
+  messages: unknown[];
 };
 
 export type GetAgentControllerControllerIdSessionsResourceId_Request = Simplify<
@@ -20041,6 +20057,7 @@ export type GetAgentControllerControllerIdSessionsResourceIdThreads_PathParams =
 export type GetAgentControllerControllerIdSessionsResourceIdThreads_QueryParams = {
   limit?: number | undefined;
   sessionScope?: string | undefined;
+  allResources?: unknown | undefined;
   tags?:
     | (
         | {
@@ -20055,6 +20072,8 @@ export type GetAgentControllerControllerIdSessionsResourceIdThreads_Response = {
   threads: {
     id: string;
     title?: string | undefined;
+    resourceId?: string | undefined;
+    createdAt?: string | undefined;
     updatedAt?: string | undefined;
     tags?:
       | {
@@ -20516,7 +20535,14 @@ export type PostAgentControllerControllerIdSessionsResourceIdToolApproval_QueryP
 
 export type PostAgentControllerControllerIdSessionsResourceIdToolApproval_Body = {
   toolCallId: string;
-  approved: boolean;
+  approved?: boolean | undefined;
+  decision?: ('approve' | 'decline' | 'always_allow_category') | undefined;
+  declineContext?:
+    | {
+        reason?: string | undefined;
+        message?: string | undefined;
+      }
+    | undefined;
   requestContext?:
     | {
         [key: string]: unknown;

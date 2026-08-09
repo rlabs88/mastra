@@ -4,7 +4,14 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { BundlerOptions } from '../build/types';
 import type { SourceDependencyConstraints } from './index';
-import { Bundler, applySourceDependencyRange, getSourceDependencyConstraints, isRegistryVersionSpec } from './index';
+import {
+  Bundler,
+  applySourceDependencyRange,
+  getSourceDependencyConstraints,
+  isRegistryVersionSpec,
+  materializeDeclaredLocalTarballDependencies,
+  materializeLocalTarballDependency,
+} from './index';
 
 const tempDirs: string[] = [];
 
@@ -149,6 +156,87 @@ describe('Bundler.writePackageJson', () => {
     const pkg = JSON.parse(await readFile(join(outputDir, 'package.json'), 'utf-8'));
     expect(pkg.dependencies.zod).toBe('^4.3.6');
     expect(pkg.dependencies.zod).not.toBe('3.25.76');
+  });
+});
+
+describe('materializeLocalTarballDependency', () => {
+  it('copies a declared file tarball into the isolated output and returns a portable package spec', async () => {
+    const { projectRoot } = await createSourceApp({
+      appManifest: {
+        name: 'source-app',
+        dependencies: { '@mastra/core': 'file:vendor/mastra-core.tgz' },
+      },
+    });
+    const vendorDir = join(projectRoot, 'vendor');
+    const outputDir = join(projectRoot, '.mastra', 'output');
+    await mkdir(vendorDir, { recursive: true });
+    await writeFile(join(vendorDir, 'mastra-core.tgz'), 'fork artifact', 'utf-8');
+
+    const result = await materializeLocalTarballDependency({
+      dependencyName: '@mastra/core',
+      dependencyInfo: { version: '1.58.0' },
+      constraints: constraints({ dependencies: { '@mastra/core': 'file:vendor/mastra-core.tgz' } }),
+      projectRoot,
+      outputDir,
+    });
+
+    expect(result).toEqual({
+      version: '1.58.0',
+      packageSpec: 'file:./vendor-dependencies/mastra-core-mastra-core.tgz',
+    });
+    await expect(
+      readFile(join(outputDir, 'vendor-dependencies', 'mastra-core-mastra-core.tgz'), 'utf-8'),
+    ).resolves.toBe('fork artifact');
+  });
+
+  it('keeps registry and local-directory dependencies unchanged', async () => {
+    const { projectRoot } = await createSourceApp({ appManifest: { name: 'source-app' } });
+    const outputDir = join(projectRoot, '.mastra', 'output');
+
+    await expect(
+      materializeLocalTarballDependency({
+        dependencyName: 'zod',
+        dependencyInfo: { version: '4.4.3' },
+        constraints: constraints({ dependencies: { zod: '^4.4.0' } }),
+        projectRoot,
+        outputDir,
+      }),
+    ).resolves.toEqual({ version: '4.4.3' });
+    await expect(
+      materializeLocalTarballDependency({
+        dependencyName: 'local-package',
+        dependencyInfo: { version: '1.0.0' },
+        constraints: constraints({ dependencies: { 'local-package': 'file:../local-package' } }),
+        projectRoot,
+        outputDir,
+      }),
+    ).resolves.toEqual({ version: '1.0.0' });
+  });
+
+  it('adds transitively used local artifacts that are declared at the app root', async () => {
+    const { projectRoot } = await createSourceApp({ appManifest: { name: 'source-app' } });
+    const vendorDir = join(projectRoot, 'vendor');
+    const outputDir = join(projectRoot, '.mastra', 'output');
+    await mkdir(vendorDir, { recursive: true });
+    await writeFile(join(vendorDir, 'observability.tgz'), 'observability fork', 'utf-8');
+    const dependencies = new Map<string, { version?: string; packageSpec?: string }>([['zod', { version: '4.4.3' }]]);
+
+    await materializeDeclaredLocalTarballDependencies({
+      dependencies,
+      constraints: constraints({
+        dependencies: {
+          zod: '^4.4.0',
+          '@mastra/observability': 'file:vendor/observability.tgz',
+        },
+      }),
+      projectRoot,
+      outputDir,
+    });
+
+    expect(dependencies.get('zod')).toEqual({ version: '4.4.3' });
+    expect(dependencies.get('@mastra/observability')).toEqual({
+      packageSpec: 'file:./vendor-dependencies/mastra-observability-observability.tgz',
+    });
   });
 });
 
