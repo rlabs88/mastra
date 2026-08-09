@@ -231,8 +231,18 @@ export function createRemoteMastraTUIBackend(options: RemoteMastraTUIBackendOpti
           previousSnapshotAtBoundary = latestSnapshot;
           latestSnapshot = candidate;
           appliedHydration = generation;
+          const rawBoundaryEvents = buffered.splice(0);
+          // Mode/model/thread/task events are projections of snapshot state.
+          // If one raced the state read, take another snapshot before exposing
+          // either value. This establishes a quiet ordered boundary without
+          // guessing whether a differing buffered value is older or newer.
+          if (rawBoundaryEvents.some(isSnapshotProjectionEvent)) {
+            buffered.unshift(...rawBoundaryEvents.filter(event => !isSnapshotProjectionEvent(event)));
+            requestedHydration++;
+            continue;
+          }
           const boundaryEvents = pruneSnapshotRepresentedEvents(
-            buffered.splice(0),
+            rawBoundaryEvents,
             candidate,
             previousSnapshotAtBoundary,
           );
@@ -369,6 +379,16 @@ export function createRemoteMastraTUIBackend(options: RemoteMastraTUIBackendOpti
   };
 }
 
+function isSnapshotProjectionEvent(event: AgentControllerEvent): boolean {
+  return (
+    event.type === 'mode_changed' ||
+    event.type === 'model_changed' ||
+    event.type === 'thread_changed' ||
+    event.type === 'thread_created' ||
+    event.type === 'task_updated'
+  );
+}
+
 function pruneSnapshotRepresentedEvents(
   events: AgentControllerEvent[],
   snapshot: MastraTUIRemoteSnapshot | undefined,
@@ -437,11 +457,6 @@ function pruneSnapshotRepresentedEvents(
     if (event.type === 'thread_changed' && snapshot.threadId === event.threadId) return false;
     if (event.type === 'thread_created' && snapshot.threadId === (event.thread as { id?: unknown }).id) return false;
     if (event.type === 'agent_start' && snapshot.running === true) return false;
-    if (event.type === 'tool_end' && eventToolCallId) {
-      const completed = findCompletedToolEvent(snapshot.messages, eventToolCallId);
-      if (completed && sameSerialized(completed.result, event.result) && completed.isError === event.isError)
-        return false;
-    }
     if (
       (event.type === 'tool_input_start' || event.type === 'tool_input_delta') &&
       eventToolCallId &&
@@ -480,23 +495,6 @@ function pruneSnapshotRepresentedEvents(
     }
     return true;
   });
-}
-
-function findCompletedToolEvent(messages: MastraDBMessage[], toolCallId: string) {
-  for (const message of messages) {
-    const parts = Array.isArray(message.content) ? message.content : [];
-    for (const part of parts) {
-      if (!part || typeof part !== 'object') continue;
-      const value = part as Record<string, unknown>;
-      const id = value.toolCallId ?? value.tool_call_id;
-      if (id !== toolCallId || !('result' in value || 'output' in value)) continue;
-      return {
-        result: value.result ?? value.output,
-        isError: value.isError === true || value.is_error === true,
-      };
-    }
-  }
-  return undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

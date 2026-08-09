@@ -125,6 +125,36 @@ function backendFixture() {
 }
 
 describe('createRemoteMastraTUIRuntime', () => {
+  it.each(['aborted', 'error'] as const)(
+    'uses persisted assistant terminal metadata when a disconnected run ends as %s',
+    async reason => {
+      const { backend, hydrate } = backendFixture();
+      const { controller, session } = createRemoteMastraTUIRuntime(backend as never);
+      await controller.init();
+      hydrate({
+        ...(await backend.getSnapshot()),
+        displayState: { isRunning: true, activeTools: {} },
+      });
+      const events: any[] = [];
+      session.subscribe((event: any) => events.push(event));
+      events.length = 0;
+
+      hydrate({
+        ...(await backend.getSnapshot()),
+        messages: [
+          {
+            id: `terminal-${reason}`,
+            role: 'assistant',
+            content: { format: 2, parts: [], metadata: { stopReason: reason } },
+          },
+        ],
+        displayState: { isRunning: false, activeTools: {} },
+      });
+
+      expect(events.filter(event => event.type === 'agent_end')).toEqual([{ type: 'agent_end', reason }]);
+    },
+  );
+
   it('lets buffered terminal payloads override lossy snapshot transitions', async () => {
     const { backend, hydrate, emit } = backendFixture();
     const { controller, session } = createRemoteMastraTUIRuntime(backend as never);
