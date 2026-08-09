@@ -126,6 +126,37 @@ describe('createRemoteMastraTUIBackend', () => {
     expect(delivered).toEqual(terminalEvents);
   });
 
+  it('rehydrates across rapid snapshot-projected changes instead of replaying an intermediate value', async () => {
+    const remoteSession = {
+      create: vi.fn(async () => ({})),
+      subscribe: vi.fn(async ({ onEvent }: { onEvent: (event: unknown) => void }) => {
+        onEvent({ type: 'mode_changed', modeId: 'plan' });
+        onEvent({ type: 'mode_changed', modeId: 'fast' });
+        return { unsubscribe: vi.fn() };
+      }),
+      state: vi.fn(async () => ({ resourceId: 'project', threadId: 'thread-1', modeId: 'fast' })),
+      listMessages: vi.fn(async () => []),
+    };
+    const backend = createRemoteMastraTUIBackend({
+      client: { getAgentController: () => ({ session: () => remoteSession }) } as never,
+      controllerId: 'mastra-code',
+      resourceId: 'project',
+      capabilities,
+      subagents: [],
+    });
+    const snapshots: string[] = [];
+    const events: unknown[] = [];
+
+    await backend.start({
+      onSnapshot: snapshot => snapshots.push(snapshot.modeId),
+      onEvent: event => events.push(event),
+    });
+
+    expect(remoteSession.state).toHaveBeenCalledTimes(2);
+    expect(snapshots).toEqual(['fast']);
+    expect(events).toEqual([]);
+  });
+
   it('does not replay buffered interactive state already represented by the hydration snapshot', async () => {
     const tasks = [{ id: 'task-1', content: 'Inspect', status: 'in_progress' }];
     const remoteSession = {

@@ -722,10 +722,19 @@ function reconcileSnapshot(
   }
   if (previousDisplay.isRunning && !nextDisplay.isRunning) {
     const previousMessageIds = new Set(previous.messages.map(message => message.id));
-    const completedDuringGap = next.messages.some(
+    const terminalMessage = next.messages.findLast(
       message => message.role === 'assistant' && !previousMessageIds.has(message.id),
     );
-    events.push({ type: 'agent_end', reason: completedDuringGap ? 'complete' : 'aborted' });
+    const stopReason = (terminalMessage?.content.metadata as { stopReason?: unknown } | undefined)?.stopReason;
+    const reason =
+      stopReason === 'error'
+        ? 'error'
+        : stopReason === 'aborted'
+          ? 'aborted'
+          : terminalMessage
+            ? 'complete'
+            : 'aborted';
+    events.push({ type: 'agent_end', reason });
   }
   events.push({ type: 'display_state_changed', displayState: nextDisplay });
   return events.filter(event => !isRepresentedByBoundaryEvent(event, boundaryEvents));
@@ -751,6 +760,15 @@ function isRepresentedByBoundaryEvent(
     }
     if (actual.type === 'thread_created' && synthetic.type === 'thread_created') {
       return (actual.thread as { id?: unknown })?.id === (synthetic.thread as { id?: unknown })?.id;
+    }
+    if (actual.type === 'mode_changed' && synthetic.type === 'mode_changed') {
+      return actual.modeId === synthetic.modeId;
+    }
+    if (actual.type === 'model_changed' && synthetic.type === 'model_changed') {
+      return actual.modelId === synthetic.modelId;
+    }
+    if (actual.type === 'task_updated' && synthetic.type === 'task_updated') {
+      return sameSerialized(actual.tasks, synthetic.tasks);
     }
     return true;
   });
