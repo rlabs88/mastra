@@ -539,7 +539,7 @@ export class MastraTUI {
   }
 
   private canUseRemoteCapability(capability: 'chat'): boolean {
-    const backend = this.state.options.backend;
+    const backend = this.state.options?.backend;
     if (!backend || backend.capabilities.localControlPlane || backend.capabilities[capability]) return true;
     showInfo(this.state, `Chat is not supported by this remote Mastra runtime.`);
     return false;

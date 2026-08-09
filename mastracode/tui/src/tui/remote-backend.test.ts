@@ -88,6 +88,44 @@ describe('createRemoteMastraTUIBackend', () => {
     expect(events).toEqual([]);
   });
 
+  it('retains lossy terminal events at the hydration boundary', async () => {
+    const terminalEvents = [
+      { type: 'tool_end', toolCallId: 'tool-1', result: { error: 'denied' }, isError: true },
+      { type: 'agent_end', reason: 'error', error: 'model failed' },
+    ];
+    const remoteSession = {
+      create: vi.fn(async () => ({})),
+      subscribe: vi.fn(async ({ onEvent }: { onEvent: (event: unknown) => void }) => {
+        for (const event of terminalEvents) onEvent(event);
+        return { unsubscribe: vi.fn() };
+      }),
+      state: vi.fn(async () => ({
+        resourceId: 'project',
+        threadId: 'thread-1',
+        messages: [],
+        displayState: { isRunning: false, activeTools: {} },
+      })),
+      listMessages: vi.fn(async () => []),
+    };
+    const backend = createRemoteMastraTUIBackend({
+      client: { getAgentController: () => ({ session: () => remoteSession }) } as never,
+      controllerId: 'mastra-code',
+      resourceId: 'project',
+      capabilities,
+      subagents: [],
+    });
+    const boundaryEvents: unknown[] = [];
+    const delivered: unknown[] = [];
+
+    await backend.start({
+      onSnapshot: (_snapshot, boundary) => boundaryEvents.push(...(boundary?.bufferedEvents ?? [])),
+      onEvent: event => delivered.push(event),
+    });
+
+    expect(boundaryEvents).toEqual(terminalEvents);
+    expect(delivered).toEqual(terminalEvents);
+  });
+
   it('does not replay buffered interactive state already represented by the hydration snapshot', async () => {
     const tasks = [{ id: 'task-1', content: 'Inspect', status: 'in_progress' }];
     const remoteSession = {

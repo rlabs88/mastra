@@ -4,7 +4,12 @@ import { MastraTUI } from './mastra-tui.js';
 import { createRemoteMastraTUIRuntime } from './remote-runtime.js';
 
 function backendFixture() {
-  let callbacks: { onSnapshot(value: any): void; onEvent(value: any): void } | undefined;
+  let callbacks:
+    | {
+        onSnapshot(value: any, boundary?: { bufferedEvents: any[] }): void;
+        onEvent(value: any): void;
+      }
+    | undefined;
   const snapshot = {
     controllerId: 'mastra-code',
     resourceId: 'project',
@@ -115,11 +120,43 @@ function backendFixture() {
   return {
     backend,
     emit: (event: any) => callbacks?.onEvent(event),
-    hydrate: (value: any) => callbacks?.onSnapshot(value),
+    hydrate: (value: any, bufferedEvents: any[] = []) => callbacks?.onSnapshot(value, { bufferedEvents }),
   };
 }
 
 describe('createRemoteMastraTUIRuntime', () => {
+  it('lets buffered terminal payloads override lossy snapshot transitions', async () => {
+    const { backend, hydrate, emit } = backendFixture();
+    const { controller, session } = createRemoteMastraTUIRuntime(backend as never);
+    await controller.init();
+    hydrate({
+      ...(await backend.getSnapshot()),
+      displayState: {
+        isRunning: true,
+        activeTools: { 'tool-1': { name: 'view', args: {}, status: 'running' } },
+      },
+    });
+    const events: any[] = [];
+    session.subscribe((event: any) => events.push(event));
+    events.length = 0;
+    const terminalEvents = [
+      { type: 'tool_end', toolCallId: 'tool-1', result: { error: 'denied' }, isError: true },
+      { type: 'agent_end', reason: 'error', error: 'model failed' },
+    ];
+
+    hydrate(
+      {
+        ...(await backend.getSnapshot()),
+        displayState: { isRunning: false, activeTools: {} },
+      },
+      terminalEvents,
+    );
+    for (const event of terminalEvents) emit(event);
+
+    expect(events.filter(event => event.type === 'tool_end')).toEqual([terminalEvents[0]]);
+    expect(events.filter(event => event.type === 'agent_end')).toEqual([terminalEvents[1]]);
+  });
+
   it('hydrates the rich TUI session facade and forwards live events and messages', async () => {
     const { backend, emit } = backendFixture();
     const { controller, session } = createRemoteMastraTUIRuntime(backend as never);
