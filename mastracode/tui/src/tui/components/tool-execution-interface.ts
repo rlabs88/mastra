@@ -21,6 +21,7 @@ export interface IToolExecutionComponent {
   updateArgs(args: unknown, rebuild?: boolean): void;
   refresh?(): void;
   updateResult(result: ToolResult, isPartial?: boolean): void;
+  updateWorkflowProgress?(value: unknown): void;
   setExpanded(expanded: boolean): void;
   setQuietModeDisplay?(mode: QuietToolDisplayMode): void;
   setQuietPreviewLineLimit?(limit: number): void;

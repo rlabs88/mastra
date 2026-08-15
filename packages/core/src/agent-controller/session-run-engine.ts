@@ -19,6 +19,7 @@ import {
   getUsageNumber,
 } from './stream-content';
 import type { TokenUsage } from './types';
+import { parseUpstreamWorkflowProgress } from './workflow-progress';
 
 /**
  * The transient state of a single in-flight agent stream: the assistant message
@@ -95,6 +96,7 @@ type StreamChunk =
   | StreamDataChunk<'data-om-activation'>
   | StreamDataChunk<'data-om-thread-update'>
   | StreamDataChunk<'data-mastracode-tool-progress'>
+  | StreamDataChunk<'data-upstream-workflow-progress'>
   | StreamDataChunk<'data-sandbox-stdout'>
   | StreamDataChunk<'data-sandbox-stderr'>
   | StreamDataChunk<'data-sandbox-exit'>;
@@ -1109,6 +1111,19 @@ export class SessionRunEngine {
           if (output) {
             this.#session.emit({ type: 'shell_output', toolCallId: d.toolCallId, output, stream: 'stdout' });
           }
+        }
+        break;
+      }
+
+      case 'data-upstream-workflow-progress': {
+        const progress = parseUpstreamWorkflowProgress((chunk as { data?: unknown }).data);
+        if (progress) {
+          this.#session.emit({ type: 'tool_update', toolCallId: progress.toolCallId, partialResult: progress });
+          state.currentMessage.content.parts.push({
+            type: 'data-upstream-workflow-progress',
+            data: progress,
+          } as StreamDataPart);
+          this.#session.emit({ type: 'message_update', message: this.cloneMessage(state.currentMessage) });
         }
         break;
       }

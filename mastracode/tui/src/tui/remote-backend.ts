@@ -9,6 +9,8 @@ import type {
   ToolCategory,
 } from '@mastra/client-js';
 import { MastraClient } from '@mastra/client-js';
+import { parseStoredWorkflowDefinition } from './workflow-ui.js';
+import type { StoredWorkflowDefinitionView } from './workflow-ui.js';
 
 export interface MastraTUIBackendCapabilities {
   readonly chat: boolean;
@@ -19,6 +21,7 @@ export interface MastraTUIBackendCapabilities {
   readonly permissions: boolean;
   readonly approvals: boolean;
   readonly skills: boolean;
+  readonly workflows?: boolean;
   readonly localControlPlane: boolean;
 }
 
@@ -69,6 +72,11 @@ export interface MastraTUIFeedbackInput {
 export interface MastraTUIBackendConnection {
   readonly snapshot: MastraTUIRemoteSnapshot;
   unsubscribe(): void;
+}
+
+export interface MastraTUIWorkflowReader {
+  list(): Promise<StoredWorkflowDefinitionView[]>;
+  get(id: string): Promise<StoredWorkflowDefinitionView | undefined>;
 }
 
 export interface MastraTUISessionBackend {
@@ -159,6 +167,7 @@ export interface MastraTUIBackend extends MastraTUISessionBackend {
   readonly capabilities: MastraTUIBackendCapabilities;
   readonly defaultResourceId: string;
   readonly subagents: ReadonlyArray<{ id: string; name: string; description: string }>;
+  readonly workflowReader?: MastraTUIWorkflowReader;
 }
 
 export interface RemoteMastraTUIBackendOptions {
@@ -169,6 +178,7 @@ export interface RemoteMastraTUIBackendOptions {
   readonly scope?: string;
   readonly tags?: Record<string, string>;
   readonly capabilities: Omit<MastraTUIBackendCapabilities, 'localControlPlane'>;
+  readonly workflowReader?: MastraTUIWorkflowReader;
   readonly subagents: ReadonlyArray<{ id: string; name: string; description: string }>;
 }
 
@@ -184,9 +194,24 @@ export function createRemoteMastraTUIBackend(options: RemoteMastraTUIBackendOpti
     return { ...state, messages };
   };
 
+  const workflowReader = options.workflowReader
+    ? {
+        async list(): Promise<StoredWorkflowDefinitionView[]> {
+          const values = await options.workflowReader!.list();
+          return values
+            .map(parseStoredWorkflowDefinition)
+            .filter((value): value is StoredWorkflowDefinitionView => !!value);
+        },
+        async get(id: string): Promise<StoredWorkflowDefinitionView | undefined> {
+          return parseStoredWorkflowDefinition(await options.workflowReader!.get(id));
+        },
+      }
+    : undefined;
+
   return {
     defaultResourceId: options.resourceId,
     subagents: options.subagents,
+    ...(workflowReader ? { workflowReader } : {}),
     capabilities: {
       ...options.capabilities,
       localControlPlane: false,

@@ -14,6 +14,83 @@ function stripAnsi(text: string): string {
 }
 
 describe('ToolExecutionComponentEnhanced quiet display', () => {
+  it('keeps upstream workflow progress visible after the final tool result arrives', () => {
+    const component = new ToolExecutionComponentEnhanced(
+      'run-workflow',
+      { workflowId: 'progress-echo', inputData: { name: 'MZ' } },
+      { quietDisplayMode: 'quiet', collapsedByDefault: true },
+      ui,
+    );
+
+    component.updateWorkflowProgress({
+      version: 1,
+      toolCallId: 'workflow-tool-1',
+      workflowId: 'progress-echo',
+      runId: 'workflow-run-1',
+      sequence: 1,
+      phase: 'run-start',
+    });
+    component.updateWorkflowProgress({
+      version: 1,
+      toolCallId: 'workflow-tool-1',
+      workflowId: 'progress-echo',
+      runId: 'workflow-run-1',
+      sequence: 2,
+      phase: 'step-result',
+      stepId: 'copy-input',
+      status: 'success',
+      durationMs: 8,
+    });
+    component.updateResult({
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({ status: 'success', workflowId: 'progress-echo', runId: 'workflow-run-1' }),
+        },
+      ],
+      isError: false,
+    });
+
+    const visible = stripAnsi(component.render(120).join('\n'));
+    expect(visible).toContain('Dynamic Workflow');
+    expect(visible).toContain('progress-echo');
+    expect(visible).toContain('copy-input');
+    expect(visible).toContain('success');
+    expect(visible).toContain('workflow-run-1');
+  });
+
+  it('renders a persisted get-workflow result as an ASCII graph', () => {
+    const component = new ToolExecutionComponentEnhanced(
+      'get-workflow',
+      { id: 'progress-echo' },
+      { quietDisplayMode: 'quiet', collapsedByDefault: true },
+      ui,
+    );
+    component.updateResult({
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            id: 'progress-echo',
+            status: 'active',
+            inputSchema: { type: 'object', properties: { name: { type: 'string' } } },
+            outputSchema: { type: 'object', properties: { message: { type: 'string' } } },
+            graph: [{ type: 'mapping', id: 'copy-input' }],
+          }),
+        },
+      ],
+      isError: false,
+    });
+
+    const visible = stripAnsi(component.render(120).join('\n'));
+    expect(visible).toContain('progress-echo  (active)');
+    expect(visible).toContain('Input:');
+    expect(visible).toContain('name: string');
+    expect(visible).toContain('1. copy-input');
+    expect(visible).toContain('mapping');
+    expect(visible).toContain('(output)');
+  });
+
   it('shows the latest lines from partial generic tool progress in quiet mode', () => {
     const component = new ToolExecutionComponentEnhanced(
       'mastra_expert',

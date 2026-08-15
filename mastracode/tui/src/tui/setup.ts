@@ -374,6 +374,16 @@ export function setupAutocomplete(state: TUIState): void {
     { name: 'think', description: 'Session thinking override (off|low|medium|high|xhigh|max|default|status)' },
     { name: 'login', description: 'Login with OAuth provider' },
     { name: 'skills', description: 'List available skills' },
+    {
+      name: 'workflows',
+      description: 'List or inspect Dynamic Workflows',
+      getArgumentCompletions: (argumentPrefix: string) =>
+        [
+          { value: 'list', label: 'list', description: 'List project workflows' },
+          { value: 'show', label: 'show', description: 'Render a workflow graph' },
+          { value: 'help', label: 'help', description: 'Show workflow command help' },
+        ].filter(command => command.value.startsWith(argumentPrefix.toLowerCase())),
+    },
     { name: 'skill/', description: 'Activate a skill by name' },
     { name: 'cost', description: 'Show token usage and estimated costs' },
     { name: 'diff', description: 'Show modified files or git diff' },

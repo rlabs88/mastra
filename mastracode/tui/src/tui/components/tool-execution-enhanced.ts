@@ -13,6 +13,13 @@ import { highlight } from 'cli-highlight';
 import type { Theme as HighlightTheme } from 'cli-highlight';
 import { sanitizeAnsiForRendering } from '../sanitize-ansi.js';
 import { BOX_INDENT, theme, mastra, tintHex, ensureTerminalGlyphContrast } from '../theme.js';
+import {
+  formatWorkflowProgressLine,
+  parseStoredWorkflowDefinition,
+  parseUpstreamWorkflowProgress,
+  renderWorkflowDefinition,
+} from '../workflow-ui.js';
+import type { UpstreamWorkflowProgress } from '../workflow-ui.js';
 import { truncateAnsi } from './ansi.js';
 import type { ChatSpacingKind } from './chat-spacing.js';
 import { ErrorDisplayComponent } from './error-display.js';
@@ -211,6 +218,7 @@ export class ToolExecutionComponentEnhanced extends WidthAwareContainer implemen
   private compactToolPreviousSummary: string | undefined;
   private compactToolGroupLabelColor: CompactToolLabelColor | undefined;
   private compactToolModeColor: string | undefined;
+  private workflowProgress = new Map<number, UpstreamWorkflowProgress>();
 
   constructor(toolName: string, args: unknown, options: ToolExecutionOptions = {}, ui: TUI) {
     super();
@@ -248,6 +256,13 @@ export class ToolExecutionComponentEnhanced extends WidthAwareContainer implemen
     this.result = result;
     this.isPartial = isPartial;
     // Keep streaming output for colored display in final result
+    this.rebuild();
+  }
+
+  updateWorkflowProgress(value: unknown): void {
+    const progress = parseUpstreamWorkflowProgress(value);
+    if (!progress) return;
+    this.workflowProgress.set(progress.sequence, progress);
     this.rebuild();
   }
 
@@ -393,8 +408,22 @@ export class ToolExecutionComponentEnhanced extends WidthAwareContainer implemen
     this.updateBgColor();
     this.contentBox.clear();
 
-    if (this.quietDisplayMode === 'quiet' && this.toolName !== MC_TOOLS.EXECUTE_COMMAND) {
+    if (
+      this.quietDisplayMode === 'quiet' &&
+      this.toolName !== MC_TOOLS.EXECUTE_COMMAND &&
+      this.workflowProgress.size === 0 &&
+      !this.getWorkflowDefinitionResult()
+    ) {
       this.renderCompactTool();
+      return;
+    }
+
+    if (this.workflowProgress.size > 0) {
+      this.renderWorkflowRunEnhanced();
+      return;
+    }
+    if (this.getWorkflowDefinitionResult()) {
+      this.renderWorkflowDefinitionEnhanced();
       return;
     }
 
@@ -2487,6 +2516,100 @@ export class ToolExecutionComponentEnhanced extends WidthAwareContainer implemen
     } else {
       // No output - just show the footer line
       this.contentBox.addChild(new Text(footerText, 0, 0));
+    }
+  }
+
+  private renderWorkflowRunEnhanced(): void {
+    const border = (char: string) => this.formatToolBorder(char);
+    const events = [...this.workflowProgress.values()].sort((left, right) => left.sequence - right.sequence);
+    const latest = events.at(-1);
+    const args = this.args && typeof this.args === 'object' ? (this.args as Record<string, unknown>) : {};
+    const workflowId = latest?.workflowId ?? (typeof args.workflowId === 'string' ? args.workflowId : '(workflow)');
+    const runId = latest?.runId;
+
+    this.addLeadingPadding();
+    this.contentBox.addChild(new Text(border('╭──'), 0, 0));
+    this.contentBox.addChild(
+      new Text(
+        `${border('│')} ${theme.bold(theme.fg('toolTitle', 'Dynamic Workflow'))} ${theme.fg('toolArgs', workflowId)}`,
+        0,
+        0,
+      ),
+    );
+    if (runId) this.contentBox.addChild(new Text(`${border('│')} ${theme.fg('muted', `run ${runId}`)}`, 0, 0));
+
+    if (events.length === 0) {
+      this.contentBox.addChild(new Text(`${border('│')} ${theme.fg('muted', 'waiting for workflow events')}`, 0, 0));
+    } else {
+      const progressLines = events.slice(-12).map(progress => {
+        const glyph = progress.phase === 'step-result' || progress.phase === 'run-finish' ? '✓' : '•';
+        return `${border('│')} ${theme.fg('toolOutput', `${glyph} ${formatWorkflowProgressLine(progress)}`)}`;
+      });
+      this.contentBox.addChild(new Text(progressLines.join('\n'), 0, 0));
+    }
+
+    if (this.result && !this.isPartial) {
+      const output = this.getFormattedOutput();
+      if (output) {
+        let resultStatus: string | undefined;
+        try {
+          const parsed = JSON.parse(output) as unknown;
+          if (parsed && typeof parsed === 'object' && typeof (parsed as Record<string, unknown>).status === 'string') {
+            resultStatus = (parsed as Record<string, unknown>).status as string;
+          }
+        } catch {
+          resultStatus = undefined;
+        }
+        if (resultStatus) {
+          this.contentBox.addChild(
+            new Text(
+              `${border('│')} ${theme.fg(this.result.isError ? 'error' : 'success', `result · ${resultStatus}`)}`,
+              0,
+              0,
+            ),
+          );
+        }
+      }
+    }
+    this.contentBox.addChild(
+      new Text(
+        `${border('╰──')} ${theme.bold(theme.fg('toolTitle', this.toolName))}${this.getStatusIndicator()}`,
+        0,
+        0,
+      ),
+    );
+  }
+
+  private renderWorkflowDefinitionEnhanced(): void {
+    const definition = this.getWorkflowDefinitionResult();
+    if (!definition) {
+      this.renderGenericToolEnhanced();
+      return;
+    }
+
+    const border = (char: string) => this.formatToolBorder(char);
+    this.addLeadingPadding();
+    this.contentBox.addChild(new Text(border('╭──'), 0, 0));
+    const diagram = renderWorkflowDefinition(definition)
+      .split('\n')
+      .map(line => `${border('│')} ${theme.fg('toolOutput', line)}`)
+      .join('\n');
+    this.contentBox.addChild(new Text(diagram, 0, 0));
+    this.contentBox.addChild(
+      new Text(
+        `${border('╰──')} ${theme.bold(theme.fg('toolTitle', this.toolName))}${this.getStatusIndicator()}`,
+        0,
+        0,
+      ),
+    );
+  }
+
+  private getWorkflowDefinitionResult() {
+    if (!this.result || this.isPartial || this.result.isError) return undefined;
+    try {
+      return parseStoredWorkflowDefinition(JSON.parse(this.getFormattedOutput()) as unknown);
+    } catch {
+      return undefined;
     }
   }
 

@@ -10,6 +10,45 @@ import { createTool } from '../../tools';
 import { isProviderDefinedTool, isVercelTool } from '../toolchecks';
 import { CoreToolBuilder } from './builder';
 
+describe('CoreToolBuilder stream writer ownership', () => {
+  it('prefers the execution-time writer when a resumed run supplies a fresh stream', async () => {
+    const staleWriter = vi.fn().mockRejectedValue(new Error('stale stream is closed'));
+    const resumedWriter = vi.fn().mockResolvedValue(undefined);
+    const testTool = createTool({
+      id: 'streaming-tool',
+      description: 'Streams progress.',
+      inputSchema: z.object({}),
+      execute: async (_input, context) => {
+        await context.writer?.custom({ type: 'data-resumed-progress', data: { ok: true } });
+        return { ok: true };
+      },
+    });
+    const builder = new CoreToolBuilder({
+      originalTool: testTool,
+      options: {
+        name: 'streaming-tool',
+        agentId: 'agent-1',
+        agentName: 'Agent 1',
+        runId: 'run-1',
+        threadId: 'thread-1',
+        outputWriter: staleWriter,
+        logger: noopLogger,
+        requestContext: new RequestContext(),
+      },
+    });
+
+    const builtTool = builder.build();
+    await expect(
+      builtTool.execute!({}, { toolCallId: 'call-1', messages: [], outputWriter: resumedWriter }),
+    ).resolves.toEqual({ ok: true });
+    expect(resumedWriter).toHaveBeenCalledWith({
+      type: 'data-resumed-progress',
+      data: { ok: true },
+    });
+    expect(staleWriter).not.toHaveBeenCalled();
+  });
+});
+
 describe('CoreToolBuilder FGA', () => {
   it('executes tools without FGA when only auth/server config is present', async () => {
     const execute = vi.fn().mockResolvedValue({ result: 'ok' });

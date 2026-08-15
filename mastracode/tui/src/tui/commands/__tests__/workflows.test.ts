@@ -1,13 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
+  deleteWorkflow: vi.fn(),
+  getWorkflow: vi.fn(),
+  listWorkflows: vi.fn(),
   runWorkflow: vi.fn(),
 }));
 
 vi.mock('@mastra/code-sdk/workflows/service', () => ({
-  deleteWorkflow: vi.fn(),
-  getWorkflow: vi.fn(),
-  listWorkflows: vi.fn(),
+  deleteWorkflow: mocks.deleteWorkflow,
+  getWorkflow: mocks.getWorkflow,
+  listWorkflows: mocks.listWorkflows,
   runWorkflow: mocks.runWorkflow,
 }));
 
@@ -15,6 +18,7 @@ import { handleWorkflowsCommand } from '../workflows.js';
 
 function createCtx() {
   return {
+    state: { options: {} },
     controller: {
       getMastra: vi.fn(() => undefined),
     },
@@ -23,9 +27,64 @@ function createCtx() {
   } as any;
 }
 
+function createRemoteCtx() {
+  const workflowReader = {
+    list: vi.fn(async () => [{ id: 'MixedCaseFlow', status: 'active', description: 'Echoes a name', graph: [] }]),
+    get: vi.fn(async (id: string) => ({
+      id,
+      status: 'active',
+      description: 'Echoes a name',
+      inputSchema: { type: 'object', properties: { name: { type: 'string' } } },
+      outputSchema: { type: 'object', properties: { message: { type: 'string' } } },
+      graph: [{ type: 'mapping', id: 'copy-input' }],
+    })),
+  };
+  const ctx = createCtx();
+  ctx.state.options.backend = {
+    capabilities: { localControlPlane: false, workflows: true },
+    workflowReader,
+  };
+  return { ctx, workflowReader };
+}
+
 describe('handleWorkflowsCommand', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     mocks.runWorkflow.mockReset();
+  });
+
+  it.each([{ args: [] }, { args: ['list'] }])(
+    'lists remote workflows for command arguments $args',
+    async ({ args }) => {
+      const { ctx, workflowReader } = createRemoteCtx();
+
+      await handleWorkflowsCommand(ctx, args);
+
+      expect(workflowReader.list).toHaveBeenCalledTimes(1);
+      expect(ctx.showInfo).toHaveBeenCalledWith('- MixedCaseFlow (active) — Echoes a name');
+    },
+  );
+
+  it.each([
+    ['explicit show', ['show', 'MixedCaseFlow']],
+    ['shorthand', ['MixedCaseFlow']],
+  ])('preserves the workflow id case for %s', async (_label, args) => {
+    const { ctx, workflowReader } = createRemoteCtx();
+
+    await handleWorkflowsCommand(ctx, args);
+
+    expect(workflowReader.get).toHaveBeenCalledWith('MixedCaseFlow');
+    expect(ctx.showInfo).toHaveBeenCalledWith(expect.stringContaining('MixedCaseFlow  (active)'));
+  });
+
+  it.each(['run', 'delete'])('keeps remote %s behind the upstream agent tool', async subcommand => {
+    const { ctx } = createRemoteCtx();
+
+    await handleWorkflowsCommand(ctx, [subcommand, 'MixedCaseFlow']);
+
+    expect(ctx.showError).toHaveBeenCalledWith(
+      `/workflows ${subcommand} is unavailable in remote mode; ask the agent to use ${subcommand}-workflow.`,
+    );
   });
 
   it.each(['help', '?', '--help'])('shows %s without requiring a Mastra instance', async subcommand => {

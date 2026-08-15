@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { deleteWorkflow, getWorkflow, listWorkflows, runWorkflow } from '@mastra/code-sdk/workflows/service';
 import type { StoredWorkflowRow, WorkflowRunEvent } from '@mastra/code-sdk/workflows/service';
 import { RequestContext } from '@mastra/core/request-context';
+import type { StoredWorkflowDefinitionView } from '../workflow-ui.js';
 import type { SlashCommandContext } from './types.js';
 
 /**
@@ -162,7 +163,7 @@ function containerTitle(index: number, entry: SerializedStepEntry): string {
  * render an outer box plus one indented sub-box per inner step so the reader
  * can see WHAT is being fanned out, iterated, or branched over.
  */
-function renderWorkflowDefinition(def: StoredWorkflowRow): string {
+function renderWorkflowDefinition(def: StoredWorkflowRow | StoredWorkflowDefinitionView): string {
   const lines: string[] = [];
   const header = def.description ? `${def.id}  (${def.status})\n${def.description}` : `${def.id}  (${def.status})`;
   lines.push(header, '');
@@ -297,6 +298,7 @@ function help(ctx: SlashCommandContext): void {
       '',
       '  /workflows [list]         List saved workflows.',
       '  /workflows show <id>      Pretty-print the full graph + schemas.',
+      '  /workflows <id>           Pretty-print a workflow (shorthand).',
       '  /workflows run <id> <json>',
       '                            Run the workflow with the given input.',
       '  /workflows delete <id>    Remove a workflow from storage.',
@@ -313,9 +315,56 @@ export async function handleWorkflowsCommand(
   args: string[],
   rawArgsText?: string,
 ): Promise<void> {
-  const sub = args[0]?.toLowerCase() ?? 'list';
+  const requested = args[0] ?? 'list';
+  const sub = requested.toLowerCase();
   if (sub === 'help' || sub === '?' || sub === '--help') {
     help(ctx);
+    return;
+  }
+
+  const backend = ctx.state?.options?.backend;
+  const remote = !!backend && !backend.capabilities.localControlPlane;
+  if (remote) {
+    const workflowReader = backend.workflowReader;
+    if (!backend.capabilities.workflows || !workflowReader) {
+      ctx.showError('Dynamic Workflows are not available from this Mastra runtime.');
+      return;
+    }
+    try {
+      if (sub === 'list') {
+        const workflows = await workflowReader.list();
+        if (workflows.length === 0) {
+          ctx.showInfo('No saved workflows. Ask the chat in build mode to "build a workflow that …".');
+          return;
+        }
+        ctx.showInfo(
+          workflows
+            .map(workflow => {
+              const head = `- ${workflow.id} (${workflow.status})`;
+              return workflow.description ? `${head} — ${workflow.description}` : head;
+            })
+            .join('\n'),
+        );
+        return;
+      }
+      if (sub === 'run' || sub === 'delete') {
+        ctx.showError(`/workflows ${sub} is unavailable in remote mode; ask the agent to use ${sub}-workflow.`);
+        return;
+      }
+      const id = sub === 'show' ? args[1] : requested;
+      if (!id) {
+        ctx.showError('Usage: /workflows show <id>');
+        return;
+      }
+      const definition = await workflowReader.get(id);
+      if (!definition) {
+        ctx.showError(`No workflow with id "${id}".`);
+        return;
+      }
+      ctx.showInfo(renderWorkflowDefinition(definition));
+    } catch (error) {
+      ctx.showError(`Workflow command failed: ${getErrorMessage(error)}`);
+    }
     return;
   }
 
@@ -424,8 +473,15 @@ export async function handleWorkflowsCommand(
         ctx.showInfo(`Deleted workflow "${id}".`);
         return;
       }
-      default:
-        ctx.showError(`Unknown /workflows subcommand: "${sub}". Try /workflows help.`);
+      default: {
+        const def = await getWorkflow(mastra, requested);
+        if (!def) {
+          ctx.showError(`No workflow with id "${requested}".`);
+          return;
+        }
+        ctx.showInfo(JSON.stringify(def, null, 2));
+        ctx.showInfo(renderWorkflowDefinition(def));
+      }
     }
   } catch (e) {
     ctx.showError(`Workflow command failed: ${getErrorMessage(e)}`);

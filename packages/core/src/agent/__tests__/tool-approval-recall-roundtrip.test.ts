@@ -207,4 +207,59 @@ describe('issue #17218: tool approval decisions round-trip on recall', () => {
     expect(v6?.state).toBe('output-available');
     expect(v6?.approval).toMatchObject({ approved: true });
   }, 30000);
+
+  it('keeps custom data emitted by an approved tool in the resumed stream and recalled message', async () => {
+    const progressTool = createTool({
+      id: 'findUserTool',
+      description: 'Returns a user while streaming durable progress.',
+      inputSchema: z.object({ name: z.string() }),
+      requireApproval: true,
+      execute: async (input, context) => {
+        await context.writer?.custom({
+          type: 'data-approved-tool-progress',
+          data: { toolCallId: context.agent?.toolCallId, name: input.name },
+        });
+        return { name: input.name, email: 'dero@mail.com' };
+      },
+    });
+    const agent = new Agent({
+      id: 'approved-progress-agent',
+      name: 'Approved Progress Agent',
+      instructions: 'Find users.',
+      model: createMockModel(),
+      tools: { findUserTool: progressTool },
+      memory: new MockMemory(),
+    });
+    const mastra = new Mastra({ agents: { agent }, logger: false, storage: new InMemoryStore() });
+    const registered = mastra.getAgent('agent');
+    const threadId = 'approved-tool-progress-thread';
+
+    const stream = await registered.stream('Find Dero Israel', {
+      memory: { resource: 'user-1', thread: { id: threadId } },
+    });
+    let toolCallId = '';
+    for await (const chunk of stream.fullStream) {
+      if (chunk.type === 'tool-call-approval') toolCallId = chunk.payload.toolCallId;
+    }
+    expect(toolCallId).toBe(TOOL_CALL_ID);
+
+    const resumed = await registered.approveToolCall({ runId: stream.runId, toolCallId });
+    const chunks = [];
+    for await (const chunk of resumed.fullStream) chunks.push(chunk);
+    expect(chunks).toContainEqual({
+      type: 'data-approved-tool-progress',
+      data: { toolCallId: TOOL_CALL_ID, name: 'Dero Israel' },
+    });
+
+    const memory = (await registered.getMemory())!;
+    const { messages } = await memory.recall({ threadId, perPage: false });
+    expect(messages.flatMap(message => message.content.parts)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'data-approved-tool-progress',
+          data: { toolCallId: TOOL_CALL_ID, name: 'Dero Israel' },
+        }),
+      ]),
+    );
+  }, 30000);
 });

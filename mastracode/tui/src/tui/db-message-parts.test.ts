@@ -125,6 +125,34 @@ describe('getAssistantRenderParts', () => {
       },
     ]);
   });
+
+  it('maps durable upstream workflow progress to a replayable render item', () => {
+    const data = {
+      version: 1,
+      toolCallId: 'workflow-tool-1',
+      workflowId: 'progress-echo',
+      runId: 'workflow-run-1',
+      sequence: 3,
+      phase: 'step-result',
+      stepId: 'copy-input',
+      status: 'success',
+      durationMs: 12,
+    };
+    const message = assistantMessage([{ type: 'data-upstream-workflow-progress', data } as never]);
+
+    expect(getAssistantRenderParts(message)).toEqual([{ kind: 'workflow-progress', data }]);
+  });
+
+  it('ignores malformed upstream workflow progress during history replay', () => {
+    const message = assistantMessage([
+      {
+        type: 'data-upstream-workflow-progress',
+        data: { version: 1, toolCallId: 'workflow-tool-1', workflowId: 'progress-echo' },
+      } as never,
+    ]);
+
+    expect(getAssistantRenderParts(message)).toEqual([]);
+  });
 });
 
 describe('signal messages', () => {

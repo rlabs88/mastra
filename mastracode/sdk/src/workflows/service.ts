@@ -30,7 +30,8 @@ export interface WorkflowRunEvent {
   [key: string]: unknown;
 }
 
-export type WorkflowRunEventCallback = (event: WorkflowRunEvent) => void;
+export type WorkflowRunEventCallback = (event: WorkflowRunEvent) => void | Promise<void>;
+export type WorkflowRunStartCallback = (runId: string) => void | Promise<void>;
 
 interface WorkflowRunOutputLike {
   fullStream: ReadableStream<WorkflowRunEvent>;
@@ -98,6 +99,8 @@ export async function runWorkflow(
    * misbehaving consumer can't take the workflow down.
    */
   onEvent?: WorkflowRunEventCallback,
+  /** Optional lifecycle hook used by UI adapters that need the durable run id before step events arrive. */
+  onRunStart?: WorkflowRunStartCallback,
 ): Promise<RunResult> {
   // `getWorkflow` is generic over the statically-registered workflow map, but
   // stored workflows are registered dynamically at load time — the id is a
@@ -115,6 +118,13 @@ export async function runWorkflow(
   }
 
   const run = await wf.createRun();
+  if (onRunStart) {
+    try {
+      await onRunStart(run.runId);
+    } catch {
+      // Presentation callbacks are fail-open and cannot interrupt execution.
+    }
+  }
   if (!onEvent) {
     return (await run.start({
       inputData,
@@ -128,7 +138,7 @@ export async function runWorkflow(
   }) as unknown as WorkflowRunOutputLike;
   for await (const event of output.fullStream) {
     try {
-      onEvent(event);
+      await onEvent(event);
     } catch {
       // Never let a bad consumer break the run.
     }

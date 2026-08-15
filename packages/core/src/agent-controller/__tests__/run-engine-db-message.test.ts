@@ -245,6 +245,46 @@ describe('SessionRunEngine — MastraDBMessage contract', () => {
     expect(message.content.metadata?.signal).toEqual(payload);
   });
 
+  it('Given upstream workflow progress, When it arrives, Then it updates the parent tool card', async () => {
+    const { engine, events } = createHarness();
+    const state = engine.createStreamState();
+    const ctx = requestContext();
+    const progress = {
+      version: 1,
+      toolCallId: 'workflow-tool-1',
+      workflowId: 'progress-echo',
+      runId: 'workflow-run-1',
+      sequence: 2,
+      phase: 'step-start',
+      stepId: 'copy-input',
+    };
+
+    await engine.processStreamChunk(
+      state,
+      chunk({ type: 'data-upstream-workflow-progress', data: progress } as StreamChunk),
+      ctx,
+    );
+
+    expect(events).toContainEqual({
+      type: 'tool_update',
+      toolCallId: 'workflow-tool-1',
+      partialResult: progress,
+    });
+    expect(state.currentMessage.content.parts).toContainEqual({
+      type: 'data-upstream-workflow-progress',
+      data: progress,
+    });
+    expect(events).toContainEqual({
+      type: 'message_update',
+      message: expect.objectContaining({
+        content: expect.objectContaining({
+          parts: expect.arrayContaining([{ type: 'data-upstream-workflow-progress', data: progress }]),
+        }),
+      }),
+    });
+    expect(events.some(event => event.type === 'shell_output')).toBe(false);
+  });
+
   it('Given a user-message signal after assistant text, When it arrives, Then it ends the assistant and emits a separate signal message', async () => {
     const { engine, events } = createHarness();
     const state = engine.createStreamState();

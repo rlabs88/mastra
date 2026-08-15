@@ -10,7 +10,7 @@ import { RequestContext, MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from '@m
 import { InMemoryStore } from '@mastra/core/storage';
 import { MastraLanguageModelV2Mock } from '@mastra/core/test-utils/llm-mock';
 import type { SerializedStepFlowEntry } from '@mastra/core/workflows';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { runWorkflowTool } from '../../tools/workflows/run-workflow.js';
 import { runWorkflow } from '../service.js';
@@ -262,6 +262,39 @@ describe('run-workflow chat tool — forwards requestContext to service', () => 
 
     expect(result.status).toBe('failed');
     expect(result.error ?? '').toContain('No model selected');
+  });
+
+  it('streams durable workflow progress chunks tied to the invoking tool call', async () => {
+    const rc = new RequestContext();
+    rc.set('controller', { session: { modelId: 'openai/gpt-5.5' }, state: {} });
+    const custom = vi.fn(async () => undefined);
+
+    const result = (await (runWorkflowTool as any).execute(
+      { workflowId: WORKFLOW_ID, inputData: { name: 'Tony' } },
+      {
+        mastra,
+        requestContext: rc,
+        agent: { toolCallId: 'tool-call-1' },
+        writer: { custom },
+      },
+    )) as { status: string };
+
+    expect(result.status).toBe('success');
+    const chunks = custom.mock.calls.map(([chunk]) => chunk);
+    expect(chunks.every(chunk => chunk.type === 'data-upstream-workflow-progress' && chunk.transient === true)).toBe(
+      true,
+    );
+    expect(chunks.map(chunk => chunk.data.phase)).toEqual([
+      'run-start',
+      'step-start',
+      'step-result',
+      'step-start',
+      'step-result',
+      'run-finish',
+    ]);
+    expect(chunks.map(chunk => chunk.data.sequence)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(chunks.every(chunk => chunk.data.toolCallId === 'tool-call-1')).toBe(true);
+    expect(new Set(chunks.map(chunk => chunk.data.runId)).size).toBe(1);
   });
 });
 

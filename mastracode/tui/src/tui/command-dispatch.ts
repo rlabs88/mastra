@@ -91,25 +91,28 @@ const EMBEDDED_ONLY_COMMANDS = new Set([
   'update',
 ]);
 
-const REMOTE_COMMAND_CAPABILITIES: Record<string, 'threads' | 'modes' | 'models' | 'goals' | 'permissions' | 'skills'> =
-  {
-    new: 'threads',
-    clone: 'threads',
-    threads: 'threads',
-    thread: 'threads',
-    'thread:tag-dir': 'threads',
-    resource: 'threads',
-    mode: 'modes',
-    models: 'models',
-    'models:pack': 'models',
-    subagents: 'models',
-    memory: 'models',
-    om: 'models',
-    goal: 'goals',
-    permissions: 'permissions',
-    yolo: 'permissions',
-    skills: 'skills',
-  };
+const REMOTE_COMMAND_CAPABILITIES: Record<
+  string,
+  'threads' | 'modes' | 'models' | 'goals' | 'permissions' | 'skills' | 'workflows'
+> = {
+  new: 'threads',
+  clone: 'threads',
+  threads: 'threads',
+  thread: 'threads',
+  'thread:tag-dir': 'threads',
+  resource: 'threads',
+  mode: 'modes',
+  models: 'models',
+  'models:pack': 'models',
+  subagents: 'models',
+  memory: 'models',
+  om: 'models',
+  goal: 'goals',
+  permissions: 'permissions',
+  yolo: 'permissions',
+  skills: 'skills',
+  workflows: 'workflows',
+};
 
 /**
  * Dispatch a slash command input to the appropriate handler.

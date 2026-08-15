@@ -19,6 +19,12 @@ export {
   taskWriteTool,
 } from './tools';
 export { defaultDisplayState, defaultOMProgressState } from './types';
+export {
+  UPSTREAM_WORKFLOW_PROGRESS_DATA_TYPE,
+  parseUpstreamWorkflowProgress,
+  type UpstreamWorkflowProgress,
+  type UpstreamWorkflowProgressPhase,
+} from './workflow-progress';
 export type {
   ActiveSubagentState,
   ActiveToolState,
