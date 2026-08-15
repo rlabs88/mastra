@@ -225,6 +225,9 @@ export type BuiltinToolId =
 /** Process-local listener notified after AgentController materializes a live session. */
 export type AgentControllerSessionCreatedListener<TState = {}> = (session: Session<TState>) => void | Promise<void>;
 
+/** Process-local listener notified after AgentController tears down a live session. */
+export type AgentControllerSessionDeletedListener<TState = {}> = (session: Session<TState>) => void | Promise<void>;
+
 export interface AgentControllerConfig<TState = {}> {
   /** Unique identifier for this controller instance */
   id: string;
@@ -243,18 +246,6 @@ export interface AgentControllerConfig<TState = {}> {
 
   /** Initial state values (must conform to schema) */
   initialState?: Partial<TState>;
-
-  /**
-   * Server-owned plan reader/archiver used by remote rich clients. The host
-   * resolves the submitted path inside its own project mount and archives only
-   * after an explicit approval.
-   */
-  planApproval?: (input: {
-    projectPath: string;
-    submittedPath: string;
-    resourceId: string;
-    archive: boolean;
-  }) => Promise<{ title: string; plan: string }>;
 
   /** Memory configuration (shared across all modes) */
   memory?: DynamicArgument<MastraMemory>;
@@ -797,6 +788,7 @@ export type AgentControllerEvent =
   | { type: 'tool_input_delta'; toolCallId: string; argsTextDelta: unknown; toolName?: string }
   | { type: 'tool_input_end'; toolCallId: string }
   | { type: 'shell_output'; toolCallId: string; output: string; stream: 'stdout' | 'stderr' }
+  | { type: 'command_exit'; toolCallId: string; exitCode: number; success: boolean }
   | { type: 'usage_update'; usage: TokenUsage }
   | { type: 'info'; message: string }
   | {

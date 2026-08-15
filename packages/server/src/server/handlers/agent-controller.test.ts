@@ -16,7 +16,6 @@ import {
   GET_AGENT_CONTROLLER_SESSION_STATE_ROUTE,
   LIST_AGENT_CONTROLLER_MODES_ROUTE,
   LIST_AGENT_CONTROLLER_THREADS_ROUTE,
-  DETACH_AGENT_CONTROLLER_THREAD_ROUTE,
   SWITCH_AGENT_CONTROLLER_MODE_ROUTE,
   DELETE_AGENT_CONTROLLER_THREAD_ROUTE,
   RENAME_AGENT_CONTROLLER_THREAD_ROUTE,
@@ -26,11 +25,6 @@ import {
   FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE,
   AGENT_CONTROLLER_TOOL_APPROVAL_ROUTE,
   AGENT_CONTROLLER_TOOL_SUSPENSION_ROUTE,
-  SET_AGENT_CONTROLLER_OM_MODEL_ROUTE,
-  SET_AGENT_CONTROLLER_SUBAGENT_MODEL_ROUTE,
-  LIST_AGENT_CONTROLLER_SKILLS_ROUTE,
-  SET_AGENT_CONTROLLER_THREAD_SETTING_ROUTE,
-  RESPOND_AGENT_CONTROLLER_PLAN_APPROVAL_ROUTE,
 } from './agent-controller';
 
 function makeAgent(id = 'test-agent') {
@@ -238,6 +232,68 @@ describe('agent-controller routes', () => {
     });
   });
 
+  // The messages/steer/follow-up routes ack immediately and let the session
+  // finish the turn in the background. Session methods can still reject (e.g.
+  // `sendMessage` rejects when signal submission fails before a stream starts),
+  // and an unobserved rejection crashes the process on Node's default
+  // `--unhandled-rejections=throw` (see mastra-ai/mastra#19734). The routes must
+  // observe the failure: log it and tell the session's subscribers.
+  describe('background session failures', () => {
+    async function getRouteSession(resourceId: string) {
+      const controller = mastra.getAgentController('code')!;
+      await controller.init();
+      return controller.createSession({ resourceId, id: resourceId, ownerId: controller.id });
+    }
+
+    const cases = [
+      { name: 'sendMessage', method: 'sendMessage', route: SEND_AGENT_CONTROLLER_MESSAGE_ROUTE },
+      { name: 'steer', method: 'steer', route: STEER_AGENT_CONTROLLER_SESSION_ROUTE },
+      { name: 'followUp', method: 'followUp', route: FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE },
+    ] as const;
+
+    for (const { name, method, route } of cases) {
+      it(`still acks, logs, and emits an error event when session.${name} rejects`, async () => {
+        const session = await getRouteSession(`user-bg-${name}`);
+        const failure = new Error('signal failed before stream started');
+        vi.spyOn(session, method as any).mockRejectedValue(failure);
+        const errorLog = vi.spyOn(mastra.getLogger(), 'error').mockImplementation(() => {});
+
+        const events: any[] = [];
+        const unsubscribe = session.subscribe(event => {
+          if (event.type === 'error') events.push(event);
+        });
+
+        const unhandled: unknown[] = [];
+        const onUnhandled = (reason: unknown) => unhandled.push(reason);
+        process.on('unhandledRejection', onUnhandled);
+
+        try {
+          const res = await route.handler({
+            mastra,
+            controllerId: 'code',
+            resourceId: `user-bg-${name}`,
+            message: 'hello',
+          } as any);
+          expect(res).toEqual({ ok: true });
+
+          // Let the rejection settle and any unhandled-rejection fire.
+          await new Promise(resolve => setTimeout(resolve, 0));
+          await new Promise(resolve => setTimeout(resolve, 0));
+
+          expect(unhandled).toEqual([]);
+          expect(errorLog).toHaveBeenCalledWith(
+            expect.stringContaining(name),
+            expect.objectContaining({ operation: name, error: failure }),
+          );
+          expect(events).toEqual([expect.objectContaining({ type: 'error', error: failure })]);
+        } finally {
+          process.off('unhandledRejection', onUnhandled);
+          unsubscribe();
+        }
+      });
+    }
+  });
+
   describe('requestContext forwarding', () => {
     // Identity injected by `server.middleware` arrives on the handler as
     // `requestContext`; the session-write routes must thread it through to the
@@ -336,36 +392,9 @@ describe('agent-controller routes', () => {
       expect(spy).toHaveBeenCalledWith({ content: 'and another thing', requestContext });
     });
 
-    it.each([
-      ['message', 'sendMessage', SEND_AGENT_CONTROLLER_MESSAGE_ROUTE, { message: 'hello' }],
-      ['steer', 'steer', STEER_AGENT_CONTROLLER_SESSION_ROUTE, { message: 'change course' }],
-      ['follow-up', 'followUp', FOLLOW_UP_AGENT_CONTROLLER_SESSION_ROUTE, { message: 'later' }],
-    ] as const)(
-      'owns detached %s failures and reports them on the session stream',
-      async (_name, method, route, body) => {
-        const session = await getRouteSession(`user-rejected-${method}`);
-        vi.spyOn(session, method).mockRejectedValue(new Error(`${method} setup failed`));
-        const errors: string[] = [];
-        const unsubscribe = session.subscribe(event => {
-          if (event.type === 'error') errors.push(event.error.message);
-        });
-
-        await expect(
-          route.handler({
-            mastra,
-            controllerId: 'code',
-            resourceId: `user-rejected-${method}`,
-            ...body,
-          } as any),
-        ).resolves.toEqual({ ok: true });
-        await vi.waitFor(() => expect(errors).toEqual([`${method} setup failed`]));
-        unsubscribe();
-      },
-    );
-
     it('forwards requestContext to session.respondToToolApproval', async () => {
       const session = await getRouteSession('user-rc');
-      const spy = vi.spyOn(session, 'respondToToolApproval').mockReturnValue(true);
+      const spy = vi.spyOn(session, 'respondToToolApproval').mockReturnValue(undefined);
       const requestContext = makeRequestContext();
 
       await AGENT_CONTROLLER_TOOL_APPROVAL_ROUTE.handler({
@@ -380,24 +409,9 @@ describe('agent-controller routes', () => {
       expect(spy).toHaveBeenCalledWith({ toolCallId: 'call-1', decision: 'approve', requestContext });
     });
 
-    it('rejects a stale tool approval instead of acknowledging a parked gate it did not resolve', async () => {
-      const session = await getRouteSession('user-stale-approval');
-      vi.spyOn(session, 'respondToToolApproval').mockReturnValue(false);
-
-      await expect(
-        AGENT_CONTROLLER_TOOL_APPROVAL_ROUTE.handler({
-          mastra,
-          controllerId: 'code',
-          resourceId: 'user-stale-approval',
-          toolCallId: 'call-stale',
-          approved: true,
-        } as any),
-      ).rejects.toMatchObject({ status: 409 });
-    });
-
     it('forwards requestContext to session.respondToToolSuspension', async () => {
       const session = await getRouteSession('user-rc');
-      const spy = vi.spyOn(session, 'respondToToolSuspension').mockResolvedValue(true);
+      const spy = vi.spyOn(session, 'respondToToolSuspension').mockResolvedValue(undefined);
       const requestContext = makeRequestContext();
 
       await AGENT_CONTROLLER_TOOL_SUSPENSION_ROUTE.handler({
@@ -410,21 +424,6 @@ describe('agent-controller routes', () => {
       } as any);
 
       expect(spy).toHaveBeenCalledWith({ toolCallId: 'call-2', resumeData: 'Yes', requestContext });
-    });
-
-    it('rejects a stale tool suspension instead of optimistically dismissing it', async () => {
-      const session = await getRouteSession('user-stale-suspension');
-      vi.spyOn(session, 'respondToToolSuspension').mockResolvedValue(false);
-
-      await expect(
-        AGENT_CONTROLLER_TOOL_SUSPENSION_ROUTE.handler({
-          mastra,
-          controllerId: 'code',
-          resourceId: 'user-stale-suspension',
-          toolCallId: 'call-stale',
-          resumeData: 'Yes',
-        } as any),
-      ).rejects.toMatchObject({ status: 409 });
     });
   });
 
@@ -538,89 +537,11 @@ describe('agent-controller routes', () => {
         mastra,
         controllerId: 'code',
         resourceId: 'user-1',
-      } as any)) as { modeId: string; threadId?: string; running?: boolean; messages?: unknown[] };
+      } as any)) as { modeId: string; threadId?: string; running?: boolean };
       expect(res.modeId).toBe('build');
       expect(typeof res.threadId).toBe('string');
       // Idle session: hydration snapshot reports not running.
       expect(res.running).toBe(false);
-      expect(res.messages).toEqual([]);
-    });
-
-    it('persists server-owned OM and subagent model selections in the hydration snapshot', async () => {
-      await SET_AGENT_CONTROLLER_OM_MODEL_ROUTE.handler({
-        mastra,
-        controllerId: 'code',
-        resourceId: 'user-model-settings',
-        role: 'observer',
-        modelId: 'openai/observer',
-      } as any);
-      await SET_AGENT_CONTROLLER_SUBAGENT_MODEL_ROUTE.handler({
-        mastra,
-        controllerId: 'code',
-        resourceId: 'user-model-settings',
-        modelId: 'openai/subagent',
-        agentType: 'cortex',
-      } as any);
-
-      const res = (await GET_AGENT_CONTROLLER_SESSION_STATE_ROUTE.handler({
-        mastra,
-        controllerId: 'code',
-        resourceId: 'user-model-settings',
-      } as any)) as { settings?: Record<string, unknown> };
-
-      expect(res.settings).toMatchObject({
-        observerModelId: 'openai/observer',
-        subagentModels: { cortex: 'openai/subagent' },
-      });
-    });
-
-    it('includes safe project-scoped TUI state and reflects cleared optional fields', async () => {
-      const controller = mastra.getAgentController('code')!;
-      await controller.init();
-      const session = await controller.createSession({
-        resourceId: 'safe-settings',
-        id: 'safe-settings',
-        ownerId: controller.id,
-      });
-      await session.state.set({
-        projectPath: '/repo',
-        configDir: '.mastra',
-        pluginCommandPaths: ['/repo/commands'],
-        escapeAsCancel: false,
-        tasks: [{ id: 'one', content: 'Verify', status: 'pending' }],
-        activePlan: null,
-        cavemanObservations: true,
-        observeAttachments: 'auto',
-      } as never);
-
-      const first = (await GET_AGENT_CONTROLLER_SESSION_STATE_ROUTE.handler({
-        mastra,
-        controllerId: 'code',
-        resourceId: 'safe-settings',
-      } as any)) as { settings?: Record<string, unknown> };
-      expect(first.settings).toMatchObject({
-        projectPath: '/repo',
-        configDir: '.mastra',
-        pluginCommandPaths: ['/repo/commands'],
-        escapeAsCancel: false,
-        tasks: [{ id: 'one' }],
-        activePlan: null,
-        cavemanObservations: true,
-        observeAttachments: 'auto',
-      });
-
-      await session.state.set({ pluginCommandPaths: undefined, activePlan: undefined } as never);
-      const cleared = JSON.parse(
-        JSON.stringify(
-          await GET_AGENT_CONTROLLER_SESSION_STATE_ROUTE.handler({
-            mastra,
-            controllerId: 'code',
-            resourceId: 'safe-settings',
-          } as any),
-        ),
-      ) as { settings?: Record<string, unknown> };
-      expect(cleared.settings).not.toHaveProperty('pluginCommandPaths');
-      expect(cleared.settings).not.toHaveProperty('activePlan');
     });
 
     it('reports running: true while a run is active', async () => {
@@ -635,68 +556,6 @@ describe('agent-controller routes', () => {
         resourceId: 'user-1',
       } as any)) as { running?: boolean };
       expect(res.running).toBe(true);
-    });
-
-    it('returns an authoritative wire-safe display snapshot for remote clients', async () => {
-      const controller = mastra.getAgentController('code')!;
-      await controller.init();
-      const session = await controller.createSession({ resourceId: 'user-1', id: 'user-1', ownerId: controller.id });
-      session.emit({ type: 'tool_start', toolCallId: 'call-1', toolName: 'read', args: { path: 'a.ts' } });
-
-      const res = (await GET_AGENT_CONTROLLER_SESSION_STATE_ROUTE.handler({
-        mastra,
-        controllerId: 'code',
-        resourceId: 'user-1',
-      } as any)) as { displayState?: { activeTools?: Record<string, { name?: string; status?: string }> } };
-
-      expect(res.displayState?.activeTools?.['call-1']).toMatchObject({ name: 'read', status: 'running' });
-      expect(() => JSON.stringify(res.displayState)).not.toThrow();
-    });
-  });
-
-  describe('LIST_AGENT_CONTROLLER_SKILLS_ROUTE', () => {
-    it('lists skills from the server-owned resolved workspace', async () => {
-      const controller = mastra.getAgentController('code')!;
-      const getSkill = vi.fn(async () => ({
-        name: 'verify',
-        path: '/repo/.agents/skills/verify',
-        description: 'Verify work',
-        instructions: 'Run checks.',
-        source: { type: 'local' },
-        references: ['acceptance.md'],
-        scripts: [],
-        assets: [],
-      }));
-      vi.spyOn(controller, 'getWorkspace').mockReturnValue({
-        skills: {
-          list: vi.fn(async () => [
-            {
-              name: 'verify',
-              path: '/repo/.agents/skills/verify',
-              description: 'Verify work',
-            },
-          ]),
-          get: getSkill,
-        },
-      } as never);
-
-      const res = await LIST_AGENT_CONTROLLER_SKILLS_ROUTE.handler({
-        mastra,
-        controllerId: 'code',
-        resourceId: 'user-skills',
-      } as any);
-
-      expect(res).toMatchObject({
-        skills: [
-          {
-            name: 'verify',
-            instructions: 'Run checks.',
-            source: { type: 'local' },
-            references: ['acceptance.md'],
-          },
-        ],
-      });
-      expect(getSkill).toHaveBeenCalledWith('/repo/.agents/skills/verify');
     });
   });
 
@@ -828,39 +687,6 @@ describe('agent-controller routes', () => {
       expect(res.threads.length).toBeGreaterThanOrEqual(1);
     });
 
-    it('persists rich-client thread settings and returns full metadata', async () => {
-      await CREATE_AGENT_CONTROLLER_SESSION_ROUTE.handler({
-        mastra,
-        controllerId: 'code',
-        resourceId: 'user-settings',
-      } as any);
-      await SET_AGENT_CONTROLLER_THREAD_SETTING_ROUTE.handler({
-        mastra,
-        controllerId: 'code',
-        resourceId: 'user-settings',
-        key: 'activeModelPack',
-        value: 'quality',
-      } as any);
-      await SET_AGENT_CONTROLLER_THREAD_SETTING_ROUTE.handler({
-        mastra,
-        controllerId: 'code',
-        resourceId: 'user-settings',
-        key: 'clone',
-        value: { sourceThreadId: 'parent' },
-      } as any);
-
-      const res = (await LIST_AGENT_CONTROLLER_THREADS_ROUTE.handler({
-        mastra,
-        controllerId: 'code',
-        resourceId: 'user-settings',
-      } as any)) as { threads: Array<{ metadata?: Record<string, unknown> }> };
-
-      expect(res.threads[0]?.metadata).toMatchObject({
-        activeModelPack: 'quality',
-        clone: { sourceThreadId: 'parent' },
-      });
-    });
-
     it('caps the result to `limit`, newest first', async () => {
       await CREATE_AGENT_CONTROLLER_SESSION_ROUTE.handler({
         mastra,
@@ -961,65 +787,6 @@ describe('agent-controller routes', () => {
         spy.mockRestore();
       }
     });
-  });
-
-  it('detaches a thread by aborting its run, cleaning its subscription, and releasing its lock', async () => {
-    const controller = mastra.getAgentController('code')!;
-    const session = await controller.createSession({ resourceId: 'user-detach' });
-    await session.thread.create({ title: 'active' });
-    const detach = vi.spyOn(session.thread, 'detachFromCurrent');
-    const clear = vi.spyOn(session.thread, 'clearAndReleaseLock');
-
-    await DETACH_AGENT_CONTROLLER_THREAD_ROUTE.handler({
-      mastra,
-      controllerId: 'code',
-      resourceId: 'user-detach',
-    } as any);
-
-    expect(detach).toHaveBeenCalledOnce();
-    expect(clear).toHaveBeenCalledOnce();
-    expect(session.thread.getId()).toBeNull();
-  });
-
-  it('delegates plan approval to the server-owned controller', async () => {
-    const controller = mastra.getAgentController('code')!;
-    await controller.init();
-    const session = await controller.createSession({ resourceId: 'user-plan', id: 'user-plan', ownerId: 'code' });
-    session.suspensions.register({ toolCallId: 'plan-1', runId: 'run-1', toolName: 'submit_plan' });
-    const respond = vi.spyOn(controller, 'respondToPlanApproval').mockResolvedValue({ title: 'Plan', plan: 'Do it' });
-
-    const result = await RESPOND_AGENT_CONTROLLER_PLAN_APPROVAL_ROUTE.handler({
-      mastra,
-      controllerId: 'code',
-      resourceId: 'user-plan',
-      toolCallId: 'plan-1',
-      submittedPath: '.mastracode/plans/change.md',
-      action: 'approved',
-    } as any);
-
-    expect(result).toEqual({ title: 'Plan', plan: 'Do it' });
-    expect(respond).toHaveBeenCalledWith(expect.anything(), {
-      toolCallId: 'plan-1',
-      submittedPath: '.mastracode/plans/change.md',
-      action: 'approved',
-    });
-  });
-
-  it('rejects stale plan approval before invoking archival', async () => {
-    const controller = mastra.getAgentController('code')!;
-    const respond = vi.spyOn(controller, 'respondToPlanApproval');
-
-    await expect(
-      RESPOND_AGENT_CONTROLLER_PLAN_APPROVAL_ROUTE.handler({
-        mastra,
-        controllerId: 'code',
-        resourceId: 'user-stale-plan',
-        toolCallId: 'plan-stale',
-        submittedPath: '.mastracode/plans/change.md',
-        action: 'approved',
-      } as any),
-    ).rejects.toMatchObject({ status: 409 });
-    expect(respond).not.toHaveBeenCalled();
   });
 
   describe('cross-resource thread access is rejected', () => {

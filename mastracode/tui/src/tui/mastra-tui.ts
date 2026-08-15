@@ -55,7 +55,6 @@ import { OnboardingInlineComponent } from './onboarding-inline.js';
 import { showModalOverlay } from './overlay.js';
 import { promptForApiKeyIfNeeded } from './prompt-api-key.js';
 
-import { createRemoteMastraTUIRuntime } from './remote-runtime.js';
 import {
   addPendingUserMessage,
   addUserMessage,
@@ -165,15 +164,19 @@ export class MastraTUI {
   private cleanupPluginReloadListener?: () => void;
   private cleanupPluginUpdateListener?: () => void;
   private lastStreamError: string | null = null;
+  /**
+   * Text submitted while the main loop was busy (running a slash command or a
+   * shell passthrough) and so was not waiting on `getUserInput`. The editor's
+   * submit handler stays installed across loop iterations, so without this the
+   * submission would resolve an already-settled promise and be silently lost.
+   */
+  private queuedUserInput: string[] = [];
+  private pendingUserInputResolve: ((text: string) => void) | undefined;
 
   private static readonly DOUBLE_CTRL_C_MS = 500;
 
   constructor(options: MastraTUIOptions) {
-    const resolvedOptions =
-      options.backend && (!options.controller || !options.session)
-        ? { ...options, ...createRemoteMastraTUIRuntime(options.backend) }
-        : options;
-    this.state = createTUIState(resolvedOptions);
+    this.state = createTUIState(options);
 
     options.githubSignals?.onSubscriptionsChanged(event => {
       const currentThreadId = this.state.session?.thread?.getId?.();
@@ -340,10 +343,6 @@ export class MastraTUI {
 
         // Handle shell passthrough (! prefix)
         if (userInput.startsWith('!')) {
-          if (this.state.options.backend && !this.state.options.backend.capabilities.localControlPlane) {
-            showInfo(this.state, 'Local shell requires embedded mcode.');
-            continue;
-          }
           await handleShellPassthrough(this.state, userInput.slice(1).trim());
           continue;
         }
@@ -376,7 +375,6 @@ export class MastraTUI {
    * Errors are handled via controller events.
    */
   private fireMessage(content: string, images?: Array<{ data: string; mimeType: string }>): void {
-    if (!this.canUseRemoteCapability('chat')) return;
     this.clearStatusTimingTicker();
     const files = images?.map(img => ({ data: img.data, mediaType: img.mimeType }));
     this.state.session.sendMessage({ content, files }).catch(error => {
@@ -450,10 +448,6 @@ export class MastraTUI {
     optimisticMessageId: string,
     pendingNewThread: boolean,
   ): void {
-    if (!this.canUseRemoteCapability('chat')) {
-      this.removeOptimisticUserMessage(optimisticMessageId);
-      return;
-    }
     const send = () => {
       this.clearStatusTimingTicker();
       this.state.analytics?.capture('mastracode_prompt_submitted', {
@@ -489,7 +483,6 @@ export class MastraTUI {
   }
 
   private signalMessage(content: string, images?: Array<{ data: string; mimeType: string }>): void {
-    if (!this.canUseRemoteCapability('chat')) return;
     const hasActiveRun = this.state.session.stream.isActive();
 
     const send = () => {
@@ -528,13 +521,6 @@ export class MastraTUI {
     pendingThread.then(send).catch((error: unknown) => {
       showError(this.state, error instanceof Error ? error.message : 'Unknown error');
     });
-  }
-
-  private canUseRemoteCapability(capability: 'chat'): boolean {
-    const backend = this.state.options?.backend;
-    if (!backend || backend.capabilities.localControlPlane || backend.capabilities[capability]) return true;
-    showInfo(this.state, `Chat is not supported by this remote Mastra runtime.`);
-    return false;
   }
 
   private queueFollowUpMessage(text: string): void {
@@ -709,11 +695,11 @@ export class MastraTUI {
     // Render existing tasks if any
     await renderExistingTasks(this.state);
 
-    if (!this.state.options.backend && this.shouldShowOnboarding()) {
+    if (this.shouldShowOnboarding()) {
       await this.showOnboarding();
     }
 
-    if (!this.state.options.backend) await this.showQuietModePreferencePromptIfNeeded();
+    await this.showQuietModePreferencePromptIfNeeded();
 
     // Check for updates after first render so network latency never blocks startup.
     void this.checkForUpdate().catch(() => {});
@@ -1040,8 +1026,12 @@ export class MastraTUI {
   private beginLifecycleRun(): void {
     const hookMgr = this.state.hookManager;
     if (!hookMgr) return;
-    const runId = randomUUID();
-    hookMgr.setRunId(runId);
+    // Reuse a run id set at receipt time (runPermissionHooksForEvent) so the
+    // PermissionRequest hook fired before the queued agent_start carries the
+    // same id as subsequent hooks in this run.
+    if (!hookMgr.getRunId()) {
+      hookMgr.setRunId(randomUUID());
+    }
     hookMgr.runAgentStart().catch(() => {});
   }
 
@@ -1144,7 +1134,12 @@ export class MastraTUI {
   // ===========================================================================
 
   private getUserInput(): Promise<string> {
+    const queued = this.queuedUserInput.shift();
+    if (queued !== undefined) {
+      return Promise.resolve(queued);
+    }
     return new Promise(resolve => {
+      this.pendingUserInputResolve = resolve;
       this.state.editor.onSubmit = (text: string) => {
         if (isGoalJudgeInputLocked(this.state)) {
           this.state.editor.setText(text);
@@ -1172,10 +1167,6 @@ export class MastraTUI {
           }
 
           if (text.startsWith('!')) {
-            if (this.state.options.backend && !this.state.options.backend.capabilities.localControlPlane) {
-              showInfo(this.state, 'Local shell requires embedded mcode.');
-              return;
-            }
             // Shell passthrough runs locally and never touches the agent, so
             // run it immediately instead of steering the active run with it.
             void handleShellPassthrough(this.state, text.slice(1).trim());
@@ -1194,7 +1185,14 @@ export class MastraTUI {
           return;
         }
 
-        resolve(text);
+        const pending = this.pendingUserInputResolve;
+        if (!pending) {
+          // The loop is busy elsewhere; hand the text over on its next turn.
+          this.queuedUserInput.push(text);
+          return;
+        }
+        this.pendingUserInputResolve = undefined;
+        pending(text);
       };
     });
   }

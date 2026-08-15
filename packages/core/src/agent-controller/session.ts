@@ -1061,8 +1061,6 @@ export interface PendingSuspension {
 export class SessionSuspensions {
   /** Parked tool calls awaiting a resume, keyed by `toolCallId`. */
   readonly #pending = new Map<string, PendingSuspension>();
-  /** Tool calls temporarily owned by an in-flight server-side interaction. */
-  readonly #claimed = new Set<string>();
 
   /** Park `toolCallId` as awaiting a resume on `runId` for `toolName`. */
   register({ toolCallId, runId, toolName }: { toolCallId: string; runId: string; toolName: string }): void {
@@ -1082,20 +1080,6 @@ export class SessionSuspensions {
   /** Drop `toolCallId` from the parked set (e.g. once resumed). */
   delete({ toolCallId }: { toolCallId: string }): void {
     this.#pending.delete(toolCallId);
-    this.#claimed.delete(toolCallId);
-  }
-
-  /** Claim a pending suspension so concurrent responders fail closed. */
-  claim({ toolCallId }: { toolCallId: string }): PendingSuspension | undefined {
-    const pending = this.#pending.get(toolCallId);
-    if (!pending || this.#claimed.has(toolCallId)) return undefined;
-    this.#claimed.add(toolCallId);
-    return pending;
-  }
-
-  /** Release a prior claim without removing the pending suspension. */
-  releaseClaim({ toolCallId }: { toolCallId: string }): void {
-    this.#claimed.delete(toolCallId);
   }
 
   /**
@@ -1111,7 +1095,6 @@ export class SessionSuspensions {
     for (const [toolCallId, suspension] of this.#pending) {
       if (suspension.runId === runId) {
         this.#pending.delete(toolCallId);
-        this.#claimed.delete(toolCallId);
         dropped.push({ toolCallId, toolName: suspension.toolName });
       }
     }
@@ -1125,7 +1108,6 @@ export class SessionSuspensions {
   clear(): Array<{ toolCallId: string; toolName: string }> {
     const dropped = [...this.#pending].map(([toolCallId, { toolName }]) => ({ toolCallId, toolName }));
     this.#pending.clear();
-    this.#claimed.clear();
     return dropped;
   }
 
@@ -1141,11 +1123,10 @@ export class SessionSuspensions {
    */
   resolveToolCallId(toolCallId?: string): string | undefined {
     if (toolCallId) {
-      return this.#pending.has(toolCallId) && !this.#claimed.has(toolCallId) ? toolCallId : undefined;
+      return this.#pending.has(toolCallId) ? toolCallId : undefined;
     }
-    const available = [...this.#pending.keys()].filter(id => !this.#claimed.has(id));
-    if (available.length === 1) {
-      return available[0];
+    if (this.#pending.size === 1) {
+      return this.#pending.keys().next().value;
     }
     return undefined;
   }
@@ -1277,9 +1258,9 @@ export class SessionApproval {
     requestContext,
     declineContext,
     onAlwaysAllow,
-  }: ApprovalResponse & { toolCallId?: string; onAlwaysAllow?: (toolName: string) => void }): boolean {
-    if (!this.isArmed()) return false;
-    if (toolCallId !== undefined && this.#toolCallId !== null && toolCallId !== this.#toolCallId) return false;
+  }: ApprovalResponse & { toolCallId?: string; onAlwaysAllow?: (toolName: string) => void }): void {
+    if (!this.isArmed()) return;
+    if (toolCallId !== undefined && this.#toolCallId !== null && toolCallId !== this.#toolCallId) return;
 
     if (decision === 'always_allow_category' && this.#toolName) {
       onAlwaysAllow?.(this.#toolName);
@@ -1294,7 +1275,6 @@ export class SessionApproval {
     this.#resolve = null;
     this.#toolName = null;
     this.#toolCallId = null;
-    return true;
   }
 
   /**
@@ -2642,9 +2622,23 @@ export class SessionDisplayState {
  * has its own bus, so events never cross between sessions. Subsystems hold a
  * reference to their session's bus and call {@link emit} directly.
  */
+/**
+ * Event types emitted once per streamed chunk. Their display-state snapshots are
+ * coalesced, since a snapshot always carries the full state and intermediate
+ * ones are immediately superseded.
+ */
+const COALESCIBLE_DISPLAY_STATE_EVENTS = new Set<AgentControllerEvent['type']>(['message_update', 'tool_input_delta']);
+
+/** Upper bound on coalesced display-state snapshots: one per this many ms, plus a leading one. */
+const DISPLAY_STATE_COALESCE_MS = 16;
+
 export class SessionBus {
   readonly #listeners: AgentControllerEventListener[] = [];
   #displayState: SessionDisplayState | undefined;
+  /** Timer for the trailing snapshot of the current coalescing window. */
+  #displayStateTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Whether a snapshot was withheld during the current window and still owes a dispatch. */
+  #displayStatePending = false;
   /**
    * The last workspace lifecycle event group emitted on this bus, replayed to
    * subscribers that attach after the workspace finished initializing. Without
@@ -2681,6 +2675,11 @@ export class SessionBus {
     };
   }
 
+  /** Whether anything is currently listening. Lets emitters skip snapshot work nobody reads. */
+  hasListeners(): boolean {
+    return this.#listeners.length > 0;
+  }
+
   emit(event: AgentControllerEvent): void {
     if (
       event.type === 'workspace_status_changed' ||
@@ -2694,8 +2693,59 @@ export class SessionBus {
       }
     }
     this.#displayState?.apply(event);
+
+    // A pending snapshot describes state that predates this event, so it must
+    // reach listeners before the event itself does. Flushing here also means a
+    // coalesced snapshot can never arrive after the event that superseded it.
+    if (!COALESCIBLE_DISPLAY_STATE_EVENTS.has(event.type)) {
+      this.#flushDisplayState();
+    }
+
     this.#dispatch(event);
-    if (event.type !== 'display_state_changed' && this.#displayState) {
+
+    if (event.type === 'display_state_changed' || !this.#displayState) return;
+
+    if (COALESCIBLE_DISPLAY_STATE_EVENTS.has(event.type)) {
+      this.#scheduleDisplayState();
+      return;
+    }
+    this.#dispatch({ type: 'display_state_changed', displayState: this.#displayState.get() });
+  }
+
+  /**
+   * Queue a display-state snapshot for a high-frequency event. Streaming a
+   * single message emits thousands of deltas, and dispatching a full snapshot
+   * per delta re-serializes the whole message (plus every completed tool's args
+   * and result) on each one. Snapshots are state-of-the-world rather than
+   * incremental, so dropping intermediate ones loses nothing: the trailing
+   * flush carries the latest state.
+   *
+   * The first delta of a burst dispatches immediately so UIs stay responsive;
+   * the rest collapse into one trailing snapshot per interval.
+   */
+  #scheduleDisplayState(): void {
+    if (this.#displayStateTimer) {
+      this.#displayStatePending = true;
+      return;
+    }
+    this.#dispatch({ type: 'display_state_changed', displayState: this.#displayState!.get() });
+    this.#displayStateTimer = setTimeout(() => {
+      this.#displayStateTimer = undefined;
+      this.#flushDisplayState();
+    }, DISPLAY_STATE_COALESCE_MS);
+    // Never hold the process open for a snapshot that only mirrors state.
+    (this.#displayStateTimer as { unref?: () => void }).unref?.();
+  }
+
+  /** Dispatch any snapshot withheld by coalescing and clear the pending timer. */
+  #flushDisplayState(): void {
+    if (this.#displayStateTimer) {
+      clearTimeout(this.#displayStateTimer);
+      this.#displayStateTimer = undefined;
+    }
+    if (!this.#displayStatePending) return;
+    this.#displayStatePending = false;
+    if (this.#displayState) {
       this.#dispatch({ type: 'display_state_changed', displayState: this.#displayState.get() });
     }
   }
@@ -2769,7 +2819,7 @@ export class Session<TState = unknown> {
    * filtered back to the session's scope. Empty when the session is unscoped.
    */
   readonly #tags: Record<string, string>;
-  readonly #workspace: Workspace;
+  readonly #workspace: Workspace | undefined;
   browser?: MastraBrowser;
 
   constructor({
@@ -2786,7 +2836,7 @@ export class Session<TState = unknown> {
     id: string;
     ownerId: string;
     tags?: Record<string, string>;
-    workspace: Workspace;
+    workspace?: Workspace;
     browser?: MastraBrowser;
   }) {
     this.#tags = tags && Object.keys(tags).length > 0 ? { ...tags } : {};
@@ -2808,8 +2858,8 @@ export class Session<TState = unknown> {
       return args => this.thread.setSettingOn({ threadId, ...args });
     });
 
-    if (!workspace || !(workspace instanceof Workspace)) {
-      throw new Error(`A session requires a valid workspace instance.`);
+    if (workspace !== undefined && !(workspace instanceof Workspace)) {
+      throw new Error(`A session workspace must be a valid Workspace instance.`);
     }
 
     this.#workspace = workspace;
@@ -2838,13 +2888,16 @@ export class Session<TState = unknown> {
   }
 
   /**
-   * The workspace resolved for this session.
+   * The workspace resolved for this session, or `undefined` when the session
+   * runs without one. A workspace is optional: sessions that only need threads,
+   * state, and agent runs (chat-style usage) do not have to configure
+   * filesystem or sandbox access.
    *
    * Dynamic workspace factories are evaluated independently when each session
    * is created. Use this accessor for operations that must stay bound to the
    * session's workspace rather than resolving through controller-global state.
    */
-  getWorkspace(): Workspace {
+  getWorkspace(): Workspace | undefined {
     return this.#workspace;
   }
 
@@ -2889,6 +2942,14 @@ export class Session<TState = unknown> {
    */
   emit(event: AgentControllerEvent): void {
     this.#bus.emit(event);
+  }
+
+  /**
+   * Whether this session has any event subscribers. Emitters use this to skip
+   * building per-event snapshots that nothing would read.
+   */
+  hasListeners(): boolean {
+    return this.#bus.hasListeners();
   }
 
   /**
@@ -2953,7 +3014,8 @@ export class Session<TState = unknown> {
   /**
    * Consume an agent stream response, folding chunks into this session's display
    * messages and usage and driving tool approval. Delegates to the per-session
-   * run engine. Used by the initial run path and tool resume.
+   * run engine. Production runs go through `processSubscribedThreadStream`;
+   * only tests call this directly.
    */
   processStream(
     response: { fullStream: AsyncIterable<any> },
@@ -3101,8 +3163,8 @@ export class Session<TState = unknown> {
     toolCallId?: string;
     requestContext?: RequestContext;
     declineContext?: { reason?: string; message?: string };
-  }): boolean {
-    return this.approval.respond({
+  }): void {
+    this.approval.respond({
       decision,
       toolCallId,
       requestContext,
@@ -3207,7 +3269,6 @@ export class Session<TState = unknown> {
     input:
       | AgentSignalInput
       | {
-          id?: string;
           content: AgentSignalContents;
           ifActive?: { attributes?: AgentSignalAttributes };
           ifIdle?: { attributes?: AgentSignalAttributes };
@@ -3271,13 +3332,7 @@ export class Session<TState = unknown> {
     const submittedAbortRequested = this.run.isAbortRequested();
     const signal = createSignal(
       'content' in input
-        ? {
-            id: input.id,
-            type: 'user',
-            tagName: 'user',
-            contents: input.content,
-            providerOptions: input.providerOptions,
-          }
+        ? { type: 'user', tagName: 'user', contents: input.content, providerOptions: input.providerOptions }
         : input,
     );
     const accepted = Promise.resolve().then(async () => {
@@ -3288,7 +3343,6 @@ export class Session<TState = unknown> {
       const threadId = this.thread.getId()!;
 
       const agent = this.machinery.getAgent();
-      this.runEngine.setRequestContext(requestContextInput);
       await this.thread.ensureSubscription(threadId);
 
       // A deferred abort (parked approval gate) leaves the AbortController
@@ -3384,7 +3438,6 @@ export class Session<TState = unknown> {
     const threadId = this.thread.getId()!;
 
     const agent = this.machinery.getAgent();
-    this.runEngine.setRequestContext(requestContextInput);
     await this.thread.ensureSubscription(threadId);
 
     if (this.run.getRunId() && this.stream.activeRunId()) {
@@ -3577,9 +3630,9 @@ export class Session<TState = unknown> {
     resumeData: any;
     toolCallId?: string;
     requestContext?: RequestContext;
-  }): Promise<boolean> {
+  }): Promise<void> {
     const resolvedToolCallId = this.suspensions.resolveToolCallId(toolCallId);
-    if (!resolvedToolCallId) return false;
+    if (!resolvedToolCallId) return;
 
     const suspension = this.suspensions.get({ toolCallId: resolvedToolCallId });
 
@@ -3590,7 +3643,7 @@ export class Session<TState = unknown> {
           response: resumeData as { action: 'approved' | 'rejected'; feedback?: string },
           requestContext,
         });
-        return true;
+        return;
       }
 
       await this.resumeToolCall({
@@ -3603,7 +3656,6 @@ export class Session<TState = unknown> {
       this.emit({ type: 'error', error: err });
       await this.finishAgentRun('error');
     }
-    return true;
   }
 
   /**
@@ -3774,7 +3826,6 @@ export class Session<TState = unknown> {
       throw new Error('Cannot resume a suspended tool without a current thread');
     }
 
-    this.runEngine.setRequestContext(requestContextInput);
     await this.thread.ensureSubscription(threadId);
     const resumedSubscriptionBoundary = this.createSubscribedResumeBoundaryWaiter(
       suspension.toolName === 'submit_plan' ? toolCallId : undefined,

@@ -75,29 +75,7 @@ describe('PlanApprovalInlineComponent', () => {
     expect(onReject).toHaveBeenCalledTimes(1);
   });
 
-  it('restores the selection with an error when approval is not acknowledged', async () => {
-    const component = new PlanApprovalInlineComponent(
-      {
-        toolCallId: 'tc-1',
-        title: 'Ship it',
-        plan: 'Build the feature',
-        onApprove: vi.fn(async () => {
-          throw new Error('server unavailable');
-        }),
-        onGoal: vi.fn(),
-        onReject: vi.fn(),
-      },
-      { requestRender: vi.fn() } as any,
-    );
-
-    await (component as any).handleApprove();
-
-    expect(component.render(80).join('\n')).toContain('Could not apply selection: server unavailable');
-    expect((component as any).resolved).toBe(false);
-    expect((component as any).selectList).toBeDefined();
-  });
-
-  it('shows hint about sending revision feedback after rejection', async () => {
+  it('shows hint about sending revision feedback after rejection', () => {
     const component = new PlanApprovalInlineComponent(
       {
         toolCallId: 'tc-1',
@@ -110,7 +88,7 @@ describe('PlanApprovalInlineComponent', () => {
       {} as any,
     );
 
-    await (component as any).handleReject();
+    (component as any).handleReject();
     const rendered = component.render(80).join('\n');
 
     expect(rendered).toContain('Changes requested');
