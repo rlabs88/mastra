@@ -988,7 +988,10 @@ export abstract class MastraServer<TApp, TRequest, TResponse> extends MastraServ
    * Stores the handler on this instance for use by handleCustomRouteRequest().
    * Returns true if custom routes were found and registered.
    */
-  protected async buildCustomRouteHandler(routes: HonoCustomApiRoute[]): Promise<boolean> {
+  protected async buildCustomRouteHandler(routes?: HonoCustomApiRoute[]): Promise<boolean> {
+    // Older framework adapters call this bridge directly. Preserve that contract while
+    // keeping registerSchemaApiRoutes() as the single source of route classification.
+    routes ??= await this.registerSchemaApiRoutes();
     if (routes.length === 0) return false;
 
     const NOT_FOUND_HEADER = 'x-mastra-custom-route-not-found';

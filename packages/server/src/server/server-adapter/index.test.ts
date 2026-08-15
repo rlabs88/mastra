@@ -26,6 +26,10 @@ class TestMastraServer extends MastraServer<any, any, any> {
     return this.buildCustomRouteHandler(routes);
   }
 
+  async buildCustomRouteHandlerWithoutRoutesForTest() {
+    return this.buildCustomRouteHandler();
+  }
+
   handleCustomRouteRequestForTest(
     url: string,
     method: string,
@@ -76,6 +80,33 @@ function createMockFGAProvider(authorized = true): IFGAProvider {
 }
 
 describe('custom route forwarding', () => {
+  it('supports legacy adapters that invoke the custom-route bridge without precomputed routes', async () => {
+    const mastra = new Mastra({
+      logger: false,
+      server: {
+        apiRoutes: [
+          {
+            path: '/legacy-adapter',
+            method: 'GET',
+            handler: async c => c.json({ compatible: true }),
+          },
+        ],
+      },
+    });
+    const adapter = new TestMastraServer({ app: {}, mastra });
+
+    await expect(adapter.buildCustomRouteHandlerWithoutRoutesForTest()).resolves.toBe(true);
+
+    const response = await adapter.handleCustomRouteRequestForTest(
+      'http://localhost/legacy-adapter',
+      'GET',
+      {},
+      undefined,
+    );
+    expect(response).not.toBeNull();
+    await expect(response!.json()).resolves.toEqual({ compatible: true });
+  });
+
   it('should forward DELETE JSON bodies to custom routes', async () => {
     const mastra = new Mastra({
       logger: false,
