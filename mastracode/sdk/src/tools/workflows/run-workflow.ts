@@ -39,11 +39,16 @@ export const runWorkflowTool = createTool({
         progress: Omit<UpstreamWorkflowProgress, 'version' | 'toolCallId' | 'workflowId' | 'runId' | 'sequence'>,
       ) => {
         if (!toolCallId || !runId) return;
-        await context.writer?.custom({
-          type: UPSTREAM_WORKFLOW_PROGRESS_DATA_TYPE,
-          data: { version: 1, toolCallId, workflowId, runId, sequence: sequence++, ...progress },
-          transient: true,
-        });
+        try {
+          await context.writer?.custom({
+            type: UPSTREAM_WORKFLOW_PROGRESS_DATA_TYPE,
+            data: { version: 1, toolCallId, workflowId, runId, sequence: sequence++, ...progress },
+            transient: true,
+          });
+        } catch {
+          // Progress is presentation-only; a disconnected renderer must not
+          // change the workflow's execution result.
+        }
       };
       const result = await runWorkflow(
         mastra as Mastra,

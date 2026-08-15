@@ -2542,8 +2542,10 @@ export class ToolExecutionComponentEnhanced extends WidthAwareContainer implemen
       this.contentBox.addChild(new Text(`${border('│')} ${theme.fg('muted', 'waiting for workflow events')}`, 0, 0));
     } else {
       const progressLines = events.slice(-12).map(progress => {
-        const glyph = progress.phase === 'step-result' || progress.phase === 'run-finish' ? '✓' : '•';
-        return `${border('│')} ${theme.fg('toolOutput', `${glyph} ${formatWorkflowProgressLine(progress)}`)}`;
+        const terminal = progress.phase === 'step-result' || progress.phase === 'run-finish';
+        const failed = terminal && (progress.status === 'failed' || progress.status === 'tripwire');
+        const glyph = failed ? '✗' : terminal ? '✓' : '•';
+        return `${border('│')} ${theme.fg(failed ? 'error' : 'toolOutput', `${glyph} ${formatWorkflowProgressLine(progress)}`)}`;
       });
       this.contentBox.addChild(new Text(progressLines.join('\n'), 0, 0));
     }

@@ -262,6 +262,27 @@ describe('Mastra.addDynamicWorkflows', () => {
     ]);
   });
 
+  it('reactivates an archived definition when it is recreated', async () => {
+    const storage = new InMemoryStore({ id: 'bundle-reactivate' });
+    const mastra = new Mastra({ logger: false, tools: { 'lookup-customer': lookupCustomer } as any, storage });
+    const definition = helperDefinition('lookup-first-customer', 'email1');
+
+    await mastra.addDynamicWorkflows([definition]);
+    const store = await storage.getStore('workflowDefinitions');
+    await store!.upsert({ id: definition.id, status: 'archived' });
+    mastra.removeWorkflow(definition.id);
+
+    await mastra.addDynamicWorkflows([definition]);
+
+    const { definitions } = await store!.list({ status: 'active' });
+    expect(definitions.map(item => item.id)).toContain(definition.id);
+
+    const restarted = new Mastra({ logger: false, tools: { 'lookup-customer': lookupCustomer } as any, storage });
+    await restarted.startWorkers();
+    expect(restarted.getWorkflow(definition.id)).toBeDefined();
+    await restarted.shutdown();
+  });
+
   it('is a no-op for an empty bundle', async () => {
     const mastra = createMastra('bundle-empty');
     await expect(mastra.addDynamicWorkflows([])).resolves.toBeUndefined();

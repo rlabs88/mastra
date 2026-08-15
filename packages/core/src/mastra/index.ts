@@ -4937,6 +4937,9 @@ export class Mastra<
             stateSchema: normalized.stateSchema,
             requestContextSchema: normalized.requestContextSchema,
             graph: normalized.graph,
+            // Saving a definition is also an explicit request to make it
+            // runnable again when a prior lifecycle operation archived it.
+            status: 'active',
           });
         }
       }

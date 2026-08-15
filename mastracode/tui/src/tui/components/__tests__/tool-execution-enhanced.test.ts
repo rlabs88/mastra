@@ -59,6 +59,30 @@ describe('ToolExecutionComponentEnhanced quiet display', () => {
     expect(visible).toContain('workflow-run-1');
   });
 
+  it.each(['failed', 'tripwire'])('renders a %s workflow finish as a failure', status => {
+    const component = new ToolExecutionComponentEnhanced(
+      'run-workflow',
+      { workflowId: 'broken-flow', inputData: {} },
+      { quietDisplayMode: 'quiet', collapsedByDefault: true },
+      ui,
+    );
+
+    component.updateWorkflowProgress({
+      version: 1,
+      toolCallId: 'workflow-tool-failed',
+      workflowId: 'broken-flow',
+      runId: 'workflow-run-failed',
+      sequence: 1,
+      phase: 'run-finish',
+      status,
+      error: 'processor rejected output',
+    });
+
+    const visible = stripAnsi(component.render(120).join('\n'));
+    expect(visible).toContain(`✗ run workflow-run-failed · ${status} · processor rejected output`);
+    expect(visible).not.toContain(`✓ run workflow-run-failed · ${status}`);
+  });
+
   it('renders a persisted get-workflow result as an ASCII graph', () => {
     const component = new ToolExecutionComponentEnhanced(
       'get-workflow',

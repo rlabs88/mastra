@@ -296,6 +296,30 @@ describe('run-workflow chat tool — forwards requestContext to service', () => 
     expect(chunks.every(chunk => chunk.data.toolCallId === 'tool-call-1')).toBe(true);
     expect(new Set(chunks.map(chunk => chunk.data.runId)).size).toBe(1);
   });
+
+  it('keeps a successful run successful when the final progress write fails', async () => {
+    const rc = new RequestContext();
+    rc.set('controller', { session: { modelId: 'openai/gpt-5.5' }, state: {} });
+    const custom = vi.fn(async (chunk: { data?: { phase?: string } }) => {
+      if (chunk.data?.phase === 'run-finish') throw new Error('display disconnected');
+    });
+
+    const result = (await (runWorkflowTool as any).execute(
+      { workflowId: WORKFLOW_ID, inputData: { name: 'Tony' } },
+      {
+        mastra,
+        requestContext: rc,
+        agent: { toolCallId: 'tool-call-final-write' },
+        writer: { custom },
+      },
+    )) as { status: string; result?: { text?: string } };
+
+    expect(result.status).toBe('success');
+    expect(result.result?.text).toBeDefined();
+    expect(custom).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ phase: 'run-finish' }) }),
+    );
+  });
 });
 
 // ============================================================================
