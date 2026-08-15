@@ -1,6 +1,8 @@
 import type { MastraDBMessage } from '@mastra/core/agent-controller';
 import { mastraDBMessageToSignal } from '@mastra/core/signals';
 import type { CreatedAgentSignal } from '@mastra/core/signals';
+import { parseUpstreamWorkflowProgress } from './workflow-ui.js';
+import type { UpstreamWorkflowProgress } from './workflow-ui.js';
 
 /**
  * DB-native accessors for `MastraDBMessage`.
@@ -41,7 +43,17 @@ export interface OmRenderPart {
   data: Record<string, unknown>;
 }
 
-export type AssistantRenderPart = TextRenderPart | ThinkingRenderPart | ToolRenderPart | OmRenderPart;
+export interface WorkflowProgressRenderPart {
+  kind: 'workflow-progress';
+  data: UpstreamWorkflowProgress;
+}
+
+export type AssistantRenderPart =
+  | TextRenderPart
+  | ThinkingRenderPart
+  | ToolRenderPart
+  | OmRenderPart
+  | WorkflowProgressRenderPart;
 
 function getParts(message: MastraDBMessage): MessagePart[] {
   const content = message.content;
@@ -118,6 +130,11 @@ export function getAssistantRenderParts(message: MastraDBMessage): AssistantRend
           isError: legacyPart.isError === true || isErrorResult(legacyPart.result),
         });
         toolCalls.delete(toolCallId);
+        break;
+      }
+      case 'data-upstream-workflow-progress': {
+        const progress = parseUpstreamWorkflowProgress((part as { data?: unknown }).data);
+        if (progress) out.push({ kind: 'workflow-progress', data: progress });
         break;
       }
       default: {

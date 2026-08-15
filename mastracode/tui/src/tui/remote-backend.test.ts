@@ -14,6 +14,37 @@ const capabilities = {
 };
 
 describe('createRemoteMastraTUIBackend', () => {
+  it('uses the host-scoped workflow reader without fetching broad stored definitions', async () => {
+    const matching = {
+      id: 'scoped-workflow',
+      status: 'active',
+      inputSchema: {},
+      outputSchema: {},
+      graph: [],
+    };
+    const workflowReader = {
+      list: vi.fn(async () => [matching]),
+      get: vi.fn(async (id: string) => (id === matching.id ? matching : undefined)),
+    };
+    const client = {
+      getAgentController: vi.fn(() => ({ session: vi.fn(() => ({})) })),
+    };
+    const backend = createRemoteMastraTUIBackend({
+      client: client as never,
+      controllerId: 'mastra-code',
+      resourceId: 'project',
+      capabilities: { ...capabilities, workflows: true },
+      workflowReader,
+      subagents: [],
+    });
+
+    await expect(backend.workflowReader?.list()).resolves.toEqual([matching]);
+    await expect(backend.workflowReader?.get('scoped-workflow')).resolves.toEqual(matching);
+    await expect(backend.workflowReader?.get('foreign-workflow')).resolves.toBeUndefined();
+    expect(workflowReader.list).toHaveBeenCalledOnce();
+    expect(workflowReader.get).toHaveBeenCalledTimes(2);
+  });
+
   it('subscribes before hydration and releases buffered events after the snapshot', async () => {
     const order: string[] = [];
     const remoteSession = {

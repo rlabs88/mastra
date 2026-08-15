@@ -25,6 +25,7 @@ import { showModalOverlay } from '../overlay.js';
 import { DEFAULT_RENDER_COALESCE_MS, requestRender, flushRender } from '../render-scheduler.js';
 import { sanitizeAnsiForRendering } from '../sanitize-ansi.js';
 import { getMarkdownTheme } from '../theme.js';
+import { parseUpstreamWorkflowProgress } from '../workflow-ui.js';
 
 import type { EventHandlerContext } from './types.js';
 
@@ -490,6 +491,13 @@ export function handleToolUpdate(ctx: EventHandlerContext, toolCallId: string, p
   const { state } = ctx;
   const component = state.pendingTools.get(toolCallId);
   if (component) {
+    const workflowProgress = parseUpstreamWorkflowProgress(partialResult);
+    if (workflowProgress && component.updateWorkflowProgress) {
+      component.updateWorkflowProgress(workflowProgress);
+      reconcileToolBoundaries(ctx);
+      requestRender(state);
+      return;
+    }
     const result: ToolResult = {
       content: [{ type: 'text', text: formatToolResult(partialResult) }],
       isError: false,

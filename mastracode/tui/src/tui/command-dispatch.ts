@@ -45,6 +45,7 @@ import {
   handleObservabilityCommand,
   handleGithubCommand,
   handleGoalCommand,
+  handleWorkflowsCommand,
   handlePruneCommand,
 } from './commands/index.js';
 import { isCurrentThreadActive, sendSlashCommandMessage } from './commands/send-slash-command-message.js';
@@ -90,25 +91,28 @@ const EMBEDDED_ONLY_COMMANDS = new Set([
   'update',
 ]);
 
-const REMOTE_COMMAND_CAPABILITIES: Record<string, 'threads' | 'modes' | 'models' | 'goals' | 'permissions' | 'skills'> =
-  {
-    new: 'threads',
-    clone: 'threads',
-    threads: 'threads',
-    thread: 'threads',
-    'thread:tag-dir': 'threads',
-    resource: 'threads',
-    mode: 'modes',
-    models: 'models',
-    'models:pack': 'models',
-    subagents: 'models',
-    memory: 'models',
-    om: 'models',
-    goal: 'goals',
-    permissions: 'permissions',
-    yolo: 'permissions',
-    skills: 'skills',
-  };
+const REMOTE_COMMAND_CAPABILITIES: Record<
+  string,
+  'threads' | 'modes' | 'models' | 'goals' | 'permissions' | 'skills' | 'workflows'
+> = {
+  new: 'threads',
+  clone: 'threads',
+  threads: 'threads',
+  thread: 'threads',
+  'thread:tag-dir': 'threads',
+  resource: 'threads',
+  mode: 'modes',
+  models: 'models',
+  'models:pack': 'models',
+  subagents: 'models',
+  memory: 'models',
+  om: 'models',
+  goal: 'goals',
+  permissions: 'permissions',
+  yolo: 'permissions',
+  skills: 'skills',
+  workflows: 'workflows',
+};
 
 /**
  * Dispatch a slash command input to the appropriate handler.
@@ -232,6 +236,10 @@ export async function dispatchSlashCommand(
       return true;
     case 'sandbox':
       await handleSandboxCmd(ctx, args);
+      return true;
+    case 'workflows':
+    case 'workflow':
+      await handleWorkflowsCommand(ctx, args, rawArgsText);
       return true;
     case 'mode':
       await handleModeCommand(ctx, args);

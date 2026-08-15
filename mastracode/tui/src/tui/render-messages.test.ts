@@ -597,6 +597,54 @@ describe('renderExistingMessages subagents', () => {
 });
 
 describe('renderExistingMessages task tools', () => {
+  it('replays durable workflow progress into one quiet-mode tool component without duplicate rows', async () => {
+    const message = dbMessage(
+      'assistant',
+      [
+        { type: 'tool_call', id: 'workflow-tool-1', name: 'run-workflow', args: { workflowId: 'progress-echo' } },
+        {
+          type: 'tool_result',
+          id: 'workflow-tool-1',
+          name: 'run-workflow',
+          result: { status: 'success', workflowId: 'progress-echo', runId: 'workflow-run-1' },
+        },
+      ],
+      'assistant-workflow',
+    );
+    const progress = {
+      version: 1,
+      toolCallId: 'workflow-tool-1',
+      workflowId: 'progress-echo',
+      runId: 'workflow-run-1',
+      sequence: 1,
+      phase: 'step-result',
+      stepId: 'copy-input',
+      status: 'success',
+      durationMs: 8,
+    };
+    message.content.parts.push(
+      { type: 'data-upstream-workflow-progress', data: progress } as never,
+      { type: 'data-upstream-workflow-progress', data: progress } as never,
+    );
+    const state = createState();
+    state.quietMode = true;
+    state.session = {
+      ...(state.session as any),
+      thread: { getId: vi.fn(() => TEST_THREAD_ID), listActiveMessages: vi.fn().mockResolvedValue([message]) },
+    } as unknown as TUIState['session'];
+    state.controller = { session: state.session, setState: vi.fn() } as unknown as TUIState['controller'];
+
+    await renderExistingMessages(state);
+
+    expect(state.allToolComponents).toHaveLength(1);
+    const visible = state.allToolComponents[0]!.render(120)
+      .join('\n')
+      .replace(/\u001b\[[0-9;]*m/g, '');
+    expect(visible).toContain('Dynamic Workflow');
+    expect(visible).toContain('workflow-run-1');
+    expect(visible.match(/copy-input/g)).toHaveLength(1);
+  });
+
   it('replays task patch results into the pinned task list', async () => {
     const messages = toDbMessages([
       {

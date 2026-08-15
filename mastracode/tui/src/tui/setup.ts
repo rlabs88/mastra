@@ -301,6 +301,43 @@ export function buildLayout(state: TUIState, refreshModelAuthStatus: () => Promi
 
   // Set focus to editor
   state.ui.setFocus(state.editor);
+
+  installOverlayFocusHandoff(state.ui, state);
+}
+
+/**
+ * #21139: hand deferred focus to a pending plan approval when the overlay
+ * stack empties. A plan approval arriving while a command overlay (e.g. the
+ * /models pack selector) is focused defers its focus into `state.pendingFocus`
+ * instead of stealing it (see handlePlanApproval); this transparent wrapper
+ * around `ui.hideOverlay` performs the hand-off on the close that empties the
+ * stack. Guarded by `pendingFocus === activeInlinePlanApproval` (not a bare
+ * null check) so a value left behind by the Ctrl+C/abort dismiss paths above,
+ * which clear activeInlinePlanApproval outside the approval's own resolution
+ * handlers, never steals focus later.
+ */
+const installedHandoffUis = new WeakSet<object>();
+
+export function installOverlayFocusHandoff(
+  ui: Pick<TUIState['ui'], 'hideOverlay' | 'hasOverlay' | 'setFocus'>,
+  state: Pick<TUIState, 'pendingFocus' | 'activeInlinePlanApproval'>,
+): void {
+  if (installedHandoffUis.has(ui)) return;
+  installedHandoffUis.add(ui);
+  const originalHideOverlay = ui.hideOverlay.bind(ui);
+  ui.hideOverlay = (...args: Parameters<typeof originalHideOverlay>) => {
+    const result = originalHideOverlay(...args);
+    if (state.pendingFocus !== undefined) {
+      if (state.pendingFocus !== state.activeInlinePlanApproval) {
+        // Stale: the approval was dismissed/aborted before the overlay closed.
+        state.pendingFocus = undefined;
+      } else if (!ui.hasOverlay()) {
+        ui.setFocus(state.pendingFocus);
+        state.pendingFocus = undefined;
+      }
+    }
+    return result;
+  };
 }
 
 // =============================================================================
@@ -337,6 +374,16 @@ export function setupAutocomplete(state: TUIState): void {
     { name: 'think', description: 'Session thinking override (off|low|medium|high|xhigh|max|default|status)' },
     { name: 'login', description: 'Login with OAuth provider' },
     { name: 'skills', description: 'List available skills' },
+    {
+      name: 'workflows',
+      description: 'List or inspect Dynamic Workflows',
+      getArgumentCompletions: (argumentPrefix: string) =>
+        [
+          { value: 'list', label: 'list', description: 'List project workflows' },
+          { value: 'show', label: 'show', description: 'Render a workflow graph' },
+          { value: 'help', label: 'help', description: 'Show workflow command help' },
+        ].filter(command => command.value.startsWith(argumentPrefix.toLowerCase())),
+    },
     { name: 'skill/', description: 'Activate a skill by name' },
     { name: 'cost', description: 'Show token usage and estimated costs' },
     { name: 'diff', description: 'Show modified files or git diff' },
@@ -365,6 +412,18 @@ export function setupAutocomplete(state: TUIState): void {
     {
       name: 'sandbox',
       description: 'Manage allowed paths (add/remove directories)',
+    },
+    {
+      name: 'workflows',
+      description: 'List / show / run / delete saved workflows',
+      getArgumentCompletions: (argumentPrefix: string) =>
+        [
+          { value: 'list', label: 'list', description: 'List all saved workflows' },
+          { value: 'show', label: 'show', description: 'Print a workflow definition (graph + schemas)' },
+          { value: 'run', label: 'run', description: 'Run a workflow: /workflows run <id> <json-input>' },
+          { value: 'delete', label: 'delete', description: 'Delete a workflow from storage' },
+          { value: 'help', label: 'help', description: 'Show /workflows subcommand help' },
+        ].filter(command => command.value.startsWith(argumentPrefix.toLowerCase())),
     },
     {
       name: 'permissions',

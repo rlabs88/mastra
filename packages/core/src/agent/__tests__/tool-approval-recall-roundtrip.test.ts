@@ -126,7 +126,7 @@ function findV6ToolPart(messages: MastraDBMessage[], toolCallId: string) {
   return undefined;
 }
 
-async function runApprovalFlow(decision: 'approve' | 'decline') {
+async function runApprovalFlow(decision: 'approve' | 'decline', declineReason?: string) {
   mockFindUser.mockClear();
 
   const agent = new Agent({
@@ -141,7 +141,7 @@ async function runApprovalFlow(decision: 'approve' | 'decline') {
   const mastra = new Mastra({ agents: { userAgent: agent }, logger: false, storage: new InMemoryStore() });
   const registered = mastra.getAgent('userAgent');
 
-  const threadId = `thread-${decision}`;
+  const threadId = `thread-${decision}${declineReason ? '-custom-reason' : ''}`;
   const stream = await registered.stream('Find the user with name - Dero Israel', {
     requireToolApproval: true,
     memory: { resource: 'user-1', thread: { id: threadId } },
@@ -158,7 +158,7 @@ async function runApprovalFlow(decision: 'approve' | 'decline') {
   const resumeStream =
     decision === 'approve'
       ? await registered.approveToolCall({ runId: stream.runId, toolCallId })
-      : await registered.declineToolCall({ runId: stream.runId, toolCallId });
+      : await registered.declineToolCall({ runId: stream.runId, toolCallId, reason: declineReason });
 
   for await (const _chunk of resumeStream.fullStream) {
     // drain so the resumed turn persists
@@ -185,6 +185,16 @@ describe('issue #17218: tool approval decisions round-trip on recall', () => {
     expect(v6?.approval).toMatchObject({ approved: false, reason: DECLINE_REASON });
   }, 30000);
 
+  it('persists a caller-supplied decline reason instead of the default (#20495)', async () => {
+    const reason = 'Reading other users PII is not allowed';
+    const { stored, v6 } = await runApprovalFlow('decline', reason);
+    expect(mockFindUser).toHaveBeenCalledTimes(0);
+
+    expect(stored?.state).toBe('output-denied');
+    expect(stored?.approval).toMatchObject({ approved: false, reason });
+    expect(v6?.approval).toMatchObject({ approved: false, reason });
+  }, 30000);
+
   it('approve persists the approval and recalls it on the v6 output-available part', async () => {
     const { stored, v6 } = await runApprovalFlow('approve');
     expect(mockFindUser).toHaveBeenCalledTimes(1);
@@ -196,5 +206,60 @@ describe('issue #17218: tool approval decisions round-trip on recall', () => {
     expect(v6).toBeDefined();
     expect(v6?.state).toBe('output-available');
     expect(v6?.approval).toMatchObject({ approved: true });
+  }, 30000);
+
+  it('keeps custom data emitted by an approved tool in the resumed stream and recalled message', async () => {
+    const progressTool = createTool({
+      id: 'findUserTool',
+      description: 'Returns a user while streaming durable progress.',
+      inputSchema: z.object({ name: z.string() }),
+      requireApproval: true,
+      execute: async (input, context) => {
+        await context.writer?.custom({
+          type: 'data-approved-tool-progress',
+          data: { toolCallId: context.agent?.toolCallId, name: input.name },
+        });
+        return { name: input.name, email: 'dero@mail.com' };
+      },
+    });
+    const agent = new Agent({
+      id: 'approved-progress-agent',
+      name: 'Approved Progress Agent',
+      instructions: 'Find users.',
+      model: createMockModel(),
+      tools: { findUserTool: progressTool },
+      memory: new MockMemory(),
+    });
+    const mastra = new Mastra({ agents: { agent }, logger: false, storage: new InMemoryStore() });
+    const registered = mastra.getAgent('agent');
+    const threadId = 'approved-tool-progress-thread';
+
+    const stream = await registered.stream('Find Dero Israel', {
+      memory: { resource: 'user-1', thread: { id: threadId } },
+    });
+    let toolCallId = '';
+    for await (const chunk of stream.fullStream) {
+      if (chunk.type === 'tool-call-approval') toolCallId = chunk.payload.toolCallId;
+    }
+    expect(toolCallId).toBe(TOOL_CALL_ID);
+
+    const resumed = await registered.approveToolCall({ runId: stream.runId, toolCallId });
+    const chunks = [];
+    for await (const chunk of resumed.fullStream) chunks.push(chunk);
+    expect(chunks).toContainEqual({
+      type: 'data-approved-tool-progress',
+      data: { toolCallId: TOOL_CALL_ID, name: 'Dero Israel' },
+    });
+
+    const memory = (await registered.getMemory())!;
+    const { messages } = await memory.recall({ threadId, perPage: false });
+    expect(messages.flatMap(message => message.content.parts)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'data-approved-tool-progress',
+          data: { toolCallId: TOOL_CALL_ID, name: 'Dero Israel' },
+        }),
+      ]),
+    );
   }, 30000);
 });

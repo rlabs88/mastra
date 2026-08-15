@@ -867,6 +867,7 @@ export async function renderExistingMessages(state: TUIState): Promise<void> {
       // Render content in order - interleaving text and tool calls
       // Accumulate text/thinking until we hit a tool call, then render both
       let accumulatedParts: Array<Extract<AssistantRenderPart, { kind: 'text' | 'thinking' }>> = [];
+      const workflowToolComponents = new Map<string, ToolExecutionComponentEnhanced>();
 
       const flushAccumulated = (isFinal = false): void => {
         // The final flush still renders when there is no trailing text but the
@@ -987,6 +988,7 @@ export async function renderExistingMessages(state: TUIState): Promise<void> {
             },
             state.ui,
           );
+          workflowToolComponents.set(part.toolCallId, toolComponent);
 
           if (hasResult) {
             toolComponent.updateResult(
@@ -1090,6 +1092,8 @@ export async function renderExistingMessages(state: TUIState): Promise<void> {
             state.allToolComponents.push(toolComponent);
           } else {
           }
+        } else if (part.kind === 'workflow-progress') {
+          workflowToolComponents.get(part.data.toolCallId)?.updateWorkflowProgress(part.data);
         } else if (part.kind === 'om') {
           // Skip start markers in history — only show completed/failed results
           if (part.event === 'start') continue;

@@ -652,7 +652,7 @@ export class CoreToolBuilder extends MastraBase {
                 name: options.name,
                 runId: options.runId!,
               },
-              options.outputWriter || execOptions.outputWriter,
+              execOptions.outputWriter ?? options.outputWriter,
             ),
             ...createObservabilityContext({ currentSpan: toolSpan }),
             abortSignal: execOptions.abortSignal,

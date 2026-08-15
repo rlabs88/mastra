@@ -304,50 +304,32 @@ async function approvePlan(
   submittedPath: string,
 ): Promise<void> {
   const { state } = ctx;
-  const remotePlanResponder = (
-    state.session as unknown as {
-      respondToPlanApproval?: (input: {
-        toolCallId: string;
-        submittedPath: string;
-        action: 'approved' | 'rejected';
-        feedback?: string;
-      }) => Promise<{ title: string; plan: string }>;
-    }
-  ).respondToPlanApproval;
-  if (remotePlanResponder) {
-    await remotePlanResponder({
-      toolCallId,
-      submittedPath,
-      action: 'approved',
-    });
-  } else {
-    await state.session.state.set({
-      activePlan: {
-        title,
-        plan,
-        approvedAt: new Date().toISOString(),
-      },
-    });
+  await state.session.state.set({
+    activePlan: {
+      title,
+      plan,
+      approvedAt: new Date().toISOString(),
+    },
+  });
 
-    // Embedded mode owns the filesystem locally. Remote mode delegates both
-    // the archive and suspension response to the Studio server above.
-    if (planPath) {
-      await approvePlanFile({
-        planPath,
-        title,
-        resourceId: state.session.identity.getResourceId(),
-      }).catch(() => {});
-    }
-
-    await state.session.respondToToolSuspension({
-      toolCallId,
-      resumeData: { action: 'approved', path: submittedPath, title, plan },
-    });
+  // Archive the approved plan to the global plans dir so it's findable later. The
+  // local plan file is left in place so the user can review every plan made.
+  if (planPath) {
+    await approvePlanFile({
+      planPath,
+      title,
+      resourceId: state.session.identity.getResourceId(),
+    }).catch(() => {});
   }
 
   // Reset in-memory diff state so the next plan doesn't diff against this one.
   state.previousPlanSnapshot = undefined;
   state.lastSubmitPlanComponent = undefined;
+
+  await state.session.respondToToolSuspension({
+    toolCallId,
+    resumeData: { action: 'approved', path: submittedPath, title, plan },
+  });
 }
 
 function formatPlanGoalObjective(title: string, plan: string): string {
@@ -402,6 +384,18 @@ export async function handlePlanApproval(
         ?.runPermissionResult('plan_approval', toolCallId, 'submit_plan', decision, { path: snapshotKey })
         .catch(() => {});
     };
+    // #21139: never force editor focus while an overlay is still up (it would
+    // deadlock the overlay via pi-tui's blocked-restore transfer), and drop any
+    // deferred focus that pointed at this approval.
+    const releaseApprovalFocus = () => {
+      state.activeInlinePlanApproval = undefined;
+      if (state.pendingFocus === approvalComponent) {
+        state.pendingFocus = undefined;
+      }
+      if (!state.ui.hasOverlay()) {
+        state.ui.setFocus(state.editor);
+      }
+    };
     const approvalOptions = {
       toolCallId,
       title: resolvedTitle,
@@ -409,13 +403,14 @@ export async function handlePlanApproval(
       planFilename,
       previousPlan,
       onApprove: async () => {
-        await approvePlan(ctx, toolCallId, resolvedTitle, plan, planPath, snapshotKey);
-        state.activeInlinePlanApproval = undefined;
-        state.ui.setFocus(state.editor);
+        releaseApprovalFocus();
         firePermissionResult('approved');
+        await approvePlan(ctx, toolCallId, resolvedTitle, plan, planPath, snapshotKey);
         resolve();
       },
       onGoal: async () => {
+        releaseApprovalFocus();
+        firePermissionResult('approved');
         await approvePlan(ctx, toolCallId, resolvedTitle, plan, planPath, snapshotKey);
 
         // `approvePlan` waits for plan mode to idle before `startGoal` sends
@@ -428,12 +423,11 @@ export async function handlePlanApproval(
           state.planStartedGoalId = goal.id;
         }
 
-        state.activeInlinePlanApproval = undefined;
-        state.ui.setFocus(state.editor);
-        firePermissionResult('approved');
         resolve();
       },
-      onReject: async () => {
+      onReject: () => {
+        releaseApprovalFocus();
+        firePermissionResult('declined');
         // Resume the tool with a rejection so the rejection result is persisted
         // in thread history (the next run sees it for context). For submit_plan,
         // respondToToolSuspension resolves at the resumed tool's `tool_end`
@@ -444,33 +438,17 @@ export async function handlePlanApproval(
         // in-loop PlanRejectionAbortProcessor (which remains as a backstop). The
         // planRejectionAbort flag suppresses the "Interrupted" abort UI so the
         // transcript stays clean for the user's revision feedback.
-        const remotePlanResponder = (
-          state.session as unknown as {
-            respondToPlanApproval?: (input: {
-              toolCallId: string;
-              submittedPath: string;
-              action: 'approved' | 'rejected';
-              feedback?: string;
-            }) => Promise<{ title: string; plan: string }>;
+        void (async () => {
+          try {
+            await state.session.respondToToolSuspension({
+              toolCallId,
+              resumeData: { action: 'rejected', path: snapshotKey, title: resolvedTitle, plan },
+            });
+          } finally {
+            state.planRejectionAbort = true;
+            state.session.abort();
           }
-        ).respondToPlanApproval;
-        if (remotePlanResponder) {
-          await remotePlanResponder({
-            toolCallId,
-            submittedPath: snapshotKey,
-            action: 'rejected',
-          });
-        } else {
-          await state.session.respondToToolSuspension({
-            toolCallId,
-            resumeData: { action: 'rejected', path: snapshotKey, title: resolvedTitle, plan },
-          });
-        }
-        state.planRejectionAbort = true;
-        state.session.abort();
-        state.activeInlinePlanApproval = undefined;
-        state.ui.setFocus(state.editor);
-        firePermissionResult('declined');
+        })();
         resolve();
       },
     };
@@ -508,6 +486,16 @@ export async function handlePlanApproval(
     }
     state.ui.requestRender();
     state.chatContainer.invalidate();
-    state.ui.setFocus(approvalComponent);
+    // #21139: focusing the approval while a command overlay (e.g. the /models
+    // pack selector) is focused makes pi-tui record a blocked overlay-restore
+    // state; the unconditional editor refocus on resolve then transfers that
+    // block onto the editor and permanently deadlocks the overlay. Defer focus
+    // until the overlay stack empties (see installOverlayFocusHandoff in
+    // setup.ts).
+    if (state.ui.hasOverlay()) {
+      state.pendingFocus = approvalComponent;
+    } else {
+      state.ui.setFocus(approvalComponent);
+    }
   });
 }

@@ -34,6 +34,7 @@ export function createLocalMastraTUIBackend(options: { controller: any; session:
       permissions: true,
       approvals: true,
       skills: true,
+      workflows: false,
       localControlPlane: true,
     },
     getSnapshot: snapshot,
